@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>vLLM Model Chooser - Find Your Perfect LLM</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { font-family: 'Inter', sans-serif; }
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a24;
+            --border: #2a2a3a;
+            --text-primary: #f0f0f5;
+            --text-secondary: #8888a0;
+            --accent: #6366f1;
+            --accent-glow: rgba(99, 102, 241, 0.3);
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        body { background: var(--bg-primary); color: var(--text-primary); }
+        .gradient-text {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #d946ef 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            transition: all 0.3s ease;
+        }
+        .card:hover {
+            border-color: var(--accent);
+            box-shadow: 0 0 30px var(--accent-glow);
+            transform: translateY(-2px);
+        }
+        .filter-btn {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            transition: all 0.2s ease;
+        }
+        .filter-btn:hover { border-color: var(--accent); }
+        .filter-btn.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+        }
+        .badge {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .badge-bf16 { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3); }
+        .badge-fp8 { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+        .badge-int4 { background: rgba(249, 115, 22, 0.2); color: #fb923c; border: 1px solid rgba(249, 115, 22, 0.3); }
+        .badge-nvfp4 { background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.3); }
+        .badge-mxfp4 { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+        .gpu-bar {
+            height: 8px;
+            border-radius: 4px;
+            background: var(--bg-secondary);
+            overflow: hidden;
+        }
+        .gpu-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+        .verdict-yes { background: var(--success); }
+        .verdict-warning { background: var(--warning); }
+        .verdict-no { background: var(--danger); }
+        .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: var(--bg-secondary); border-radius: 3px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+        .benchmark-bar {
+            height: 6px;
+            background: var(--bg-secondary);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .benchmark-fill {
+            height: 100%;
+            border-radius: 3px;
+            background: linear-gradient(90deg, var(--accent), #8b5cf6);
+        }
+        .modal-backdrop {
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(8px);
+        }
+        .stats-card {
+            background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-secondary) 100%);
+        }
+    </style>
+</head>
+<body class="scrollbar-thin">
+    <div class="min-h-screen">
+        <!-- Navigation -->
+        <nav class="border-b border-[#2a2a3a] bg-[#0a0a0f]/80 backdrop-blur-lg sticky top-0 z-50">
+            <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+                <div>
+                    <h1 class="text-2xl font-bold"><span class="gradient-text">vLLM Model Chooser</span></h1>
+                    <p class="text-sm text-[#8888a0]">Find your perfect LLM for any GPU setup</p>
+                </div>
+                <button onclick="openGPUInfoModal()" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>
+                    GPU & Format Info
+                </button>
+            </div>
+        </nav>
+
+        <div class="max-w-7xl mx-auto px-6 py-8">
+            <!-- Stats Cards -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                <div class="stats-card rounded-xl p-4 border border-[#2a2a3a]">
+                    <div class="text-sm text-[#8888a0]">Total Models</div>
+                    <div class="text-3xl font-bold mt-1" id="totalModels">0</div>
+                </div>
+                <div class="stats-card rounded-xl p-4 border border-[#2a2a3a]">
+                    <div class="text-sm text-[#8888a0]">Fit Selected GPU</div>
+                    <div class="text-3xl font-bold mt-1 text-[#22c55e]" id="fitModels">0</div>
+                </div>
+                <div class="stats-card rounded-xl p-4 border border-[#2a2a3a]">
+                    <div class="text-sm text-[#8888a0]">Quant Variants</div>
+                    <div class="text-3xl font-bold mt-1 text-[#f59e0b]" id="quantModels">0</div>
+                </div>
+                <div class="stats-card rounded-xl p-4 border border-[#2a2a3a]">
+                    <div class="text-sm text-[#8888a0]">Don't Fit</div>
+                    <div class="text-3xl font-bold mt-1 text-[#ef4444]" id="noFitModels">0</div>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="flex flex-wrap gap-4 mb-6 items-center">
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-[#8888a0] font-medium">GPUs:</span>
+                    <div class="flex gap-1" id="gpuCountFilter">
+                        <button class="filter-btn px-3 py-1.5 rounded-lg text-sm active" data-value="1" onclick="setGPUFilter(1)">1</button>
+                        <button class="filter-btn px-3 py-1.5 rounded-lg text-sm" data-value="2" onclick="setGPUFilter(2)">2</button>
+                        <button class="filter-btn px-3 py-1.5 rounded-lg text-sm" data-value="4" onclick="setGPUFilter(4)">4</button>
+                        <button class="filter-btn px-3 py-1.5 rounded-lg text-sm" data-value="8" onclick="setGPUFilter(8)">8</button>
+                    </div>
+                </div>
+                <div>
+                    <select id="gpuTypeSelect" onchange="setGPUFilter(currentGPUFilter)" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="L4-24GB">L4 24GB</option>
+                        <option value="A100-80GB">A100 80GB</option>
+                        <option value="H100-80GB">H100 80GB</option>
+                        <option value="H200-141GB">H200 141GB</option>
+                        <option value="B100-192GB">B100 192GB</option>
+                        <option value="B200-192GB">B200 192GB</option>
+                    </select>
+                </div>
+                <div>
+                    <select id="quantFilter" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="all">All Precision</option>
+                        <option value="BF16">BF16</option>
+                        <option value="FP8">FP8</option>
+                        <option value="INT4">INT4 / AWQ / GPTQ</option>
+                        <option value="NVFP4">NVFP4</option>
+                        <option value="MXFP4">MXFP4</option>
+                    </select>
+                </div>
+                <div>
+                    <select id="typeFilter" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="all">All Types</option>
+                        <option value="text">Text</option>
+                        <option value="vision">Vision</option>
+                        <option value="moe">MoE</option>
+                        <option value="embedding">Embedding</option>
+                    </select>
+                </div>
+                <div>
+                    <select id="contextFilter" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="0">Any Context</option>
+                        <option value="8192">8K+</option>
+                        <option value="32768">32K+</option>
+                        <option value="131072">128K+</option>
+                        <option value="1048576">1M+</option>
+                    </select>
+                </div>
+                <div class="ml-auto flex gap-2">
+                    <input id="searchInput" oninput="filterModels()" type="text" placeholder="Search models..." class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white w-48">
+                    <select id="sortSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="default">Default</option>
+                        <option value="params">Parameters</option>
+                        <option value="vram">VRAM</option>
+                        <option value="contextLength">Context Length</option>
+                        <option value="name">Name</option>
+                        <option value="mmlu">MMLU Score</option>
+                        <option value="humaneval">HumanEval Score</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Models Grid -->
+            <div id="modelsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+            
+            <!-- No Results -->
+            <div id="noResults" class="hidden text-center py-20">
+                <div class="text-4xl mb-4">🔍</div>
+                <h3 class="text-xl font-semibold mb-2">No Models Found</h3>
+                <p class="text-[#8888a0]">Try adjusting your filters or search query</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal -->
+    <div id="modelModal" class="hidden fixed inset-0 z-50 modal-backdrop flex items-center justify-center p-4">
+        <div class="bg-[#1a1a24] border border-[#2a2a3a] rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto scrollbar-thin">
+            <div class="sticky top-0 bg-[#1a1a24] border-b border-[#2a2a3a] px-6 py-4 flex items-center justify-between">
+                <div>
+                    <h2 id="modalTitle" class="text-xl font-bold"></h2>
+                    <p id="modalProvider" class="text-sm text-[#8888a0]"></p>
+                </div>
+                <button onclick="closeModal()" class="text-[#8888a0] hover:text-white text-2xl">&times;</button>
+            </div>
+            <div id="modalContent" class="p-6"></div>
+        </div>
+    </div>
+
+    <script>
+// GPU hardware specs: vram = physical VRAM, usableVram = 95% utilization budget
+const GPU_CONFIG = {
+    'L4-24GB': { vram: 24, usableVram: 23, architecture: 'Ada Lovelace', name: 'L4 24GB' },
+    'A100-80GB': { vram: 80, usableVram: 76, architecture: 'Ampere', name: 'A100 80GB' },
+    'H100-80GB': { vram: 80, usableVram: 76, architecture: 'Hopper', name: 'H100 80GB' },
+    'H200-141GB': { vram: 141, usableVram: 134, architecture: 'Hopper', name: 'H200 141GB' },
+    'B100-192GB': { vram: 192, usableVram: 182, architecture: 'Blackwell', name: 'B100 192GB' },
+    'B200-192GB': { vram: 192, usableVram: 182, architecture: 'Blackwell', name: 'B200 192GB' },
+};
+
+// GPU quantization format support matrix: each GPU lists ALL formats it can run (native + SW)
+// Formats NOT listed are completely unsupported (✗) on that GPU
+const GPU_QUANT_COMPAT = {
+    'L4-24GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16'],
+    'A100-80GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16'],
+    'H100-80GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'MXFP4'],
+    'H200-141GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'MXFP4'],
+    'B100-192GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'NVFP4', 'NVFP4-QAD', 'MXFP4', 'MXFP8'],
+    'B200-192GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'NVFP4', 'NVFP4-QAD', 'MXFP4', 'MXFP8'],
+};
+
+// Maps any precision string to canonical format name. PRIORITY ORDER MATTERS:
+// Specific formats (NVFP4, MXFP4, MXFP8) MUST be checked before generic (FP8, FP4)
+// to avoid false matches like "MXFP8" matching "FP8" or "FP4+FP8" matching "FP8"
+function normalizePrec(prec) {
+    if (!prec) return null;
+    const upper = prec.toUpperCase();
+    if (upper.includes('NVFP4')) return 'NVFP4';
+    if (upper.includes('MXFP4')) return 'MXFP4';
+    if (upper.includes('MXFP8')) return 'MXFP8';
+    if (upper === 'FP4+FP8' || (upper.includes('FP4') && !upper.includes('FP8'))) return 'NVFP4';
+    if (upper.includes('FP8')) return 'FP8';
+    if (upper === 'BF16') return 'BF16';
+    if (upper.includes('INT4') || upper.includes('AWQ') || upper.includes('GPTQ') || upper.includes('W4A16')) return 'INT4';
+    return null;
+}
+
+// Gate: checks if a precision format is compatible with a given GPU type
+// Unknown GPU or unknown format → returns true (fail-safe, don't break)
+function isPrecCompatible(prec, gpuType) {
+    const formats = GPU_QUANT_COMPAT[gpuType];
+    if (!formats) return true;
+    const norm = normalizePrec(prec);
+    if (!norm) return true;
+    return formats.includes(norm);
+}
+
+// Single source of truth for GPU VRAM calculation — must exist EXACTLY once
+function getGPUVRAM(gpus) {
+    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+    return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);
+}
+
+// 108 models — each entry has weight-only VRAM (NO KV cache included)
+// Variants are alternative precisions with lower VRAM requirements
+const MODELS_DATA = [
+    { id: 1, name: "Kimi-K2.7-Code", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "INT4", vram: 500, variants: [{prec: "INT4", vram: 500, note: "GGUF via llama.cpp (not vLLM)"}], type: "vision", contextLength: 32768, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "moonshotai/Kimi-K2.7-Code" },
+    { id: 2, name: "diffusiongemma-26B-A4B-it", provider: "Google", params: "26B/4B", totalParams: 26, activeParams: 4, prec: "BF16", vram: 52, variants: [{prec: "FP8", vram: 26}, {prec: "NVFP4", vram: 13}], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 72.1, humaneval: 55.2, math: 48.3}, hf_url: "google/diffusiongemma-26B-A4B-it" , contextLength: 8192},
+    { id: 3, name: "NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", provider: "nvidia", params: "550B/55B", totalParams: 550, activeParams: 55, prec: "BF16", vram: 1320, variants: [{prec: "NVFP4", vram: 330}], type: "text", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {mmlu: 85.2, humaneval: 82.1, math: 75.4}, hf_url: "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16" },
+    { id: 4, name: "MiniMax-M3", provider: "MiniMaxAI", params: "427B/26B", totalParams: 427, activeParams: 26, prec: "BF16", vram: 854, variants: [{prec: "MXFP8", vram: 427, note: "mi36x"}], type: "moe", contextLength: 1048576, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "MiniMaxAI/MiniMax-M3" },
+    { id: 5, name: "Cosmos3-Super-Text2Image", provider: "nvidia", params: "64B", totalParams: 64, activeParams: 64, prec: "BF16", vram: 128, variants: [], type: "vision", gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "nvidia/Cosmos3-Super-Text2Image" , contextLength: 262144},
+    { id: 6, name: "Mellum2-12B-A2.5B-Thinking", provider: "JetBrains", params: "12B/2.5B", totalParams: 12, activeParams: 2.5, prec: "BF16", vram: 24, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.4, humaneval: 45.2, math: 52.1}, hf_url: "JetBrains/Mellum2-12B-A2.5B-Thinking" , contextLength: 131072},
+    { id: 7, name: "Step-3.7-Flash", provider: "stepfun-ai", params: "198B/11B", totalParams: 198, activeParams: 11, prec: "BF16", vram: 396, variants: [{prec: "FP8", vram: 198}], type: "moe", gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "stepfun-ai/Step-3.7-Flash" , contextLength: 262144},
+    { id: 8, name: "gemma-4-12B-it", provider: "Google", params: "12B", totalParams: 12, activeParams: 12, prec: "BF16", vram: 29, variants: [{prec: "W4A16", vram: 9}], type: "text", contextLength: 131072, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 76.8, humaneval: 52.4, math: 54.2, mgsm: 78.3}, hf_url: "google/gemma-4-12B-it" },
+    { id: 9, name: "Cosmos3-Super-Image2Video", provider: "nvidia", params: "64B", totalParams: 64, activeParams: 64, prec: "BF16", vram: 128, variants: [], type: "vision", gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "nvidia/Cosmos3-Super-Image2Video" , contextLength: 262144},
+    { id: 10, name: "MiniCPM5-1B", provider: "openbmb", params: "1.1B", totalParams: 1.1, activeParams: 1.1, prec: "BF16", vram: 2, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 58.2, humaneval: 28.4, math: 32.1}, hf_url: "openbmb/MiniCPM5-1B" , contextLength: 131072},
+    { id: 11, name: "Intern-S2-Preview", provider: "internlm", params: "36B/3B", totalParams: 36, activeParams: 3, prec: "BF16", vram: 72, variants: [{prec: "FP8", vram: 36}], type: "moe", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 72.5, humaneval: 48.2, math: 45.8}, hf_url: "internlm/Intern-S2-Preview" , contextLength: 262144},
+    { id: 17, name: "Laguna-XS.2", provider: "poolside", params: "33B/3B", totalParams: 33, activeParams: 3, prec: "BF16", vram: 66, variants: [], type: "moe", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 70.4, humaneval: 55.8, math: 48.2}, hf_url: "poolside/Laguna-XS.2" , contextLength: 262144},
+    { id: 18, name: "DeepSeek-V4-Pro", provider: "deepseek-ai", params: "1600B/49B", totalParams: 1600, activeParams: 49, prec: "FP4+FP8", vram: 960, variants: [{prec: "NVFP4", vram: 960}], type: "moe", contextLength: 1048576, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {mmlu: 88.5, humaneval: 92.1, math: 86.4}, hf_url: "deepseek-ai/DeepSeek-V4-Pro" },
+    { id: 19, name: "DeepSeek-V4-Flash", provider: "deepseek-ai", params: "284B/13B", totalParams: 284, activeParams: 13, prec: "FP4+FP8", vram: 170, variants: [{prec: "NVFP4", vram: 170, note: "Blackwell only"}], type: "moe", contextLength: 1048576, gpuFeasibility: {1: false, 2: true, 4: true, 8: true, note: "FP8_E4M3/E8M0 not supported on A100"}, benchmark: {mmlu: 87.2, humaneval: 90.5, math: 85.1}, hf_url: "deepseek-ai/DeepSeek-V4-Flash" },
+    { id: 20, name: "Qwen3.6-27B", provider: "Qwen", params: "27B", totalParams: 27, activeParams: 27, prec: "BF16", vram: 65, variants: [{prec: "FP8", vram: 33}], type: "text", contextLength: 262144, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 78.5, humaneval: 58.4, math: 52.3}, hf_url: "Qwen/Qwen3.6-27B" },
+    { id: 21, name: "Nemotron-3-Nano-Omni-30B-A3B-Reasoning", provider: "nvidia", params: "31B/3B", totalParams: 31, activeParams: 3, prec: "BF16", vram: 62, variants: [{prec: "FP8", vram: 31}, {prec: "NVFP4", vram: 16}], type: "moe", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 74.2, humaneval: 52.8, math: 58.4}, hf_url: "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16" , contextLength: 131072},
+    { id: 22, name: "Qwen3.6-35B-A3B", provider: "Qwen", params: "35B/3B", totalParams: 35, activeParams: 3, prec: "BF16", vram: 84, variants: [{prec: "FP8", vram: 42}, {prec: "NVFP4", vram: 21}], type: "moe", contextLength: 262144, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 79.2, humaneval: 62.1, math: 55.8}, hf_url: "Qwen/Qwen3.6-35B-A3B" },
+    { id: 24, name: "MiniCPM-V-4.6", provider: "openbmb", params: "1.3B", totalParams: 1.3, activeParams: 1.3, prec: "BF16", vram: 3, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 62.4, humaneval: 35.2, math: 38.5}, hf_url: "openbmb/MiniCPM-V-4.6" , contextLength: 262144},
+    { id: 26, name: "MiniMax-M2.7", provider: "MiniMaxAI", params: "230B/10B", totalParams: 230, activeParams: 10, prec: "FP8", vram: 230, variants: [{prec: "NVFP4", vram: 115, note: "Blackwell only"}], type: "moe", contextLength: 196608, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {mmlu: 74.8, humaneval: 65.2, math: 58.4}, hf_url: "MiniMaxAI/MiniMax-M2.7", tested: true },
+    { id: 30, name: "gemma-4-26B-A4B-it", provider: "Google", params: "26B/4B", totalParams: 26, activeParams: 4, prec: "BF16", vram: 64, variants: [{prec: "FP8", vram: 32}, {prec: "NVFP4", vram: 16}], type: "vision", contextLength: 131072, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 77.5, humaneval: 54.8, math: 49.2}, hf_url: "google/gemma-4-26B-A4B-it" },
+    { id: 31, name: "gemma-4-31B-it", provider: "Google", params: "31B", totalParams: 31, activeParams: 31, prec: "BF16", vram: 75, variants: [{prec: "FP8", vram: 38}, {prec: "NVFP4", vram: 19}, {prec: "W4A16", vram: 20}], type: "text", contextLength: 262144, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 78.6, humaneval: 48.8, math: 50.0, mgsm: 74.3}, hf_url: "google/gemma-4-31B-it" },
+    { id: 32, name: "Cosmos3-Nano", provider: "nvidia", params: "16B", totalParams: 16, activeParams: 16, prec: "BF16", vram: 32, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "nvidia/Cosmos3-Nano" , contextLength: 262144},
+    { id: 33, name: "Cosmos3-Super", provider: "nvidia", params: "64B", totalParams: 64, activeParams: 64, prec: "BF16", vram: 128, variants: [], type: "vision", gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "nvidia/Cosmos3-Super" , contextLength: 262144},
+    { id: 35, name: "NVIDIA-Nemotron-3-Nano-4B-BF16", provider: "nvidia", params: "4B", totalParams: 4, activeParams: 4, prec: "BF16", vram: 8, variants: [{prec: "FP8", vram: 4}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 58.4, humaneval: 38.2, math: 32.5}, hf_url: "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16" , contextLength: 262144},
+    { id: 36, name: "gemma-4-E2B-it", provider: "Google", params: "5B", totalParams: 5, activeParams: 5, prec: "BF16", vram: 10, variants: [{prec: "FP8", vram: 5}, {prec: "QAT-W4A16", vram: 3}, {prec: "QAT-mobile", vram: 2}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 65.2, humaneval: 42.5, math: 38.4}, hf_url: "google/gemma-4-E2B-it" , contextLength: 131072},
+    { id: 37, name: "gemma-4-E4B-it", provider: "Google", params: "8B", totalParams: 8, activeParams: 8, prec: "BF16", vram: 16, variants: [{prec: "FP8", vram: 8}, {prec: "QAT-W4A16", vram: 5}, {prec: "QAT-mobile", vram: 3}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.4, humaneval: 45.2, math: 42.1}, hf_url: "google/gemma-4-E4B-it" , contextLength: 131072},
+    { id: 38, name: "Qwen3.5-0.8B", provider: "Qwen", params: "0.8B", totalParams: 0.8, activeParams: 0.8, prec: "BF16", vram: 2, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 52.4, humaneval: 28.5, math: 25.2}, hf_url: "Qwen/Qwen3.5-0.8B" , contextLength: 262144},
+    { id: 39, name: "Qwen3.5-2B", provider: "Qwen", params: "2B", totalParams: 2, activeParams: 2, prec: "BF16", vram: 4, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 55.8, humaneval: 32.4, math: 28.6}, hf_url: "Qwen/Qwen3.5-2B" , contextLength: 262144},
+    { id: 40, name: "Qwen3.5-4B", provider: "Qwen", params: "4B", totalParams: 4, activeParams: 4, prec: "BF16", vram: 8, variants: [{prec: "FP8", vram: 4}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 58.2, humaneval: 35.8, math: 32.4}, hf_url: "Qwen/Qwen3.5-4B" , contextLength: 262144},
+    { id: 41, name: "Qwen3.5-9B", provider: "Qwen", params: "9B", totalParams: 9, activeParams: 9, prec: "BF16", vram: 18, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 65.4, humaneval: 42.8, math: 38.2}, hf_url: "Qwen/Qwen3.5-9B" , contextLength: 262144},
+    { id: 43, name: "Qwen3.5-27B", provider: "Qwen", params: "27B", totalParams: 27, activeParams: 27, prec: "BF16", vram: 54, variants: [{prec: "FP8", vram: 27}, {prec: "GPTQ-Int4", vram: 14}], type: "text", contextLength: 262144, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 75.8, humaneval: 52.4, math: 48.5}, hf_url: "Qwen/Qwen3.5-27B" },
+    { id: 44, name: "Qwen3.5-35B-A3B", provider: "Qwen", params: "35B/3B", totalParams: 35, activeParams: 3, prec: "BF16", vram: 84, variants: [{prec: "FP8", vram: 42}, {prec: "GPTQ-Int4", vram: 21}], type: "moe", contextLength: 262144, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 77.2, humaneval: 55.4, math: 50.8}, hf_url: "Qwen/Qwen3.5-35B-A3B" },
+    { id: 46, name: "MiniMax-M2.5", provider: "MiniMaxAI", params: "230B/10B", totalParams: 230, activeParams: 10, prec: "FP8", vram: 230, variants: [{prec: "NVFP4", vram: 115, note: "Blackwell only"}], type: "moe", contextLength: 196608, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {mmlu: 73.5, humaneval: 62.4, math: 56.2}, hf_url: "MiniMaxAI/MiniMax-M2.5" },
+    { id: 47, name: "GLM-5.2", provider: "zai-org", params: "743B/39B", totalParams: 743, activeParams: 39, prec: "FP8", vram: 743, variants: [{prec: "BF16", vram: 1486}], type: "moe", contextLength: 1048576, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "zai-org/GLM-5.2" },
+    { id: 48, name: "GLM-5", provider: "zai-org", params: "744B/40B", totalParams: 744, activeParams: 40, prec: "BF16", vram: 1488, variants: [], type: "moe", contextLength: 131072, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "zai-org/GLM-5" },
+    { id: 49, name: "GLM-OCR", provider: "zai-org", params: "0.9B", totalParams: 0.9, activeParams: 0.9, prec: "BF16", vram: 2, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "zai-org/GLM-OCR" , contextLength: 131072},
+    { id: 50, name: "PaddleOCR-VL-1.5", provider: "PaddlePaddle", params: "0.9B", totalParams: 0.9, activeParams: 0.9, prec: "BF16", vram: 2, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "PaddlePaddle/PaddleOCR-VL-1.5" , contextLength: 131072},
+    { id: 51, name: "Qwen3-ASR-1.7B", provider: "Qwen", params: "2.3B", totalParams: 2.3, activeParams: 2.3, prec: "BF16", vram: 5, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 54.2, humaneval: null, math: null}, hf_url: "Qwen/Qwen3-ASR-1.7B" , contextLength: 65536},
+    { id: 52, name: "DeepSeek-OCR-2", provider: "deepseek-ai", params: "3B", totalParams: 3, activeParams: 3, prec: "BF16", vram: 6, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "deepseek-ai/DeepSeek-OCR-2" , contextLength: 8192},
+    { id: 53, name: "Mistral-Small-4-119B-2603", provider: "mistralai", params: "119B/6.5B", totalParams: 119, activeParams: 6.5, prec: "FP8", vram: 143, variants: [{prec: "NVFP4", vram: 72}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: 82.4, humaneval: 75.2, math: 72.8}, hf_url: "mistralai/Mistral-Small-4-119B-2603" },
+    { id: 54, name: "jina-embeddings-v5-text-small", provider: "jinaai", params: "0.7B", totalParams: 0.7, activeParams: 0.7, prec: "BF16", vram: 1, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "jinaai/jina-embeddings-v5-text-small" , contextLength: 32768},
+    { id: 55, name: "Voxtral-Mini-4B-Realtime-2602", provider: "mistralai", params: "4.4B", totalParams: 4.4, activeParams: 4.4, prec: "BF16", vram: 9, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 58.5, humaneval: 35.2, math: 32.4}, hf_url: "mistralai/Voxtral-Mini-4B-Realtime-2602" , contextLength: 131072},
+    { id: 56, name: "translategemma-27b-it", provider: "Google", params: "27B", totalParams: 27, activeParams: 27, prec: "BF16", vram: 54, variants: [{prec: "FP8", vram: 27}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 74.2, humaneval: 48.5, math: 45.2}, hf_url: "google/translategemma-27b-it" , contextLength: 8192},
+    { id: 57, name: "GLM-Image", provider: "zai-org", params: "16B", totalParams: 16, activeParams: 16, prec: "BF16", vram: 32, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.4, humaneval: 45.2, math: null}, hf_url: "zai-org/GLM-Image" , contextLength: 8192},
+    { id: 60, name: "MiniMax-M2.1", provider: "MiniMaxAI", params: "230B/10B", totalParams: 230, activeParams: 10, prec: "FP8", vram: 230, variants: [{prec: "NVFP4", vram: 115, note: "Blackwell only"}], type: "moe", contextLength: 196608, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {mmlu: 72.8, humaneval: 60.5, math: 54.2}, hf_url: "MiniMaxAI/MiniMax-M2.1" },
+    { id: 62, name: "GLM-ASR-Nano-2512", provider: "zai-org", params: "2.3B", totalParams: 2.3, activeParams: 2.3, prec: "BF16", vram: 5, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "zai-org/GLM-ASR-Nano-2512" , contextLength: 8192},
+    { id: 63, name: "GLM-4.6V", provider: "zai-org", params: "107B/12B", totalParams: 107, activeParams: 12, prec: "BF16", vram: 214, variants: [], type: "vision", gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {mmlu: 78.5, humaneval: 62.4, math: null}, hf_url: "zai-org/GLM-4.6V" , contextLength: 131072},
+    { id: 64, name: "LongCat-Image-Edit", provider: "meituan-longcat", params: "6B", totalParams: 6, activeParams: 6, prec: "BF16", vram: 12, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "meituan-longcat/LongCat-Image-Edit" , contextLength: 8192},
+    { id: 65, name: "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", provider: "nvidia", params: "30B/3B", totalParams: 30, activeParams: 3, prec: "BF16", vram: 72, variants: [{prec: "FP8", vram: 35}], type: "moe", contextLength: 262144, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 72.4, humaneval: 48.5, math: 52.1}, hf_url: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16" },
+    { id: 70, name: "Ministral-3-14B-Instruct-2512", provider: "mistralai", params: "14B", totalParams: 14, activeParams: 14, prec: "FP8", vram: 14, variants: [{prec: "FP8", vram: 7}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.4, humaneval: 45.2, math: 42.8}, hf_url: "mistralai/Ministral-3-14B-Instruct-2512" , contextLength: 262144},
+    { id: 71, name: "Ministral-3-8B-Reasoning-2512", provider: "mistralai", params: "8B", totalParams: 8, activeParams: 8, prec: "BF16", vram: 16, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 65.2, humaneval: 42.5, math: 48.2}, hf_url: "mistralai/Ministral-3-8B-Reasoning-2512" , contextLength: 262144},
+    { id: 72, name: "Kimi-Linear-48B-A3B-Instruct", provider: "moonshotai", params: "48B/3B", totalParams: 48, activeParams: 3, prec: "BF16", vram: 96, variants: [], type: "moe", gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: 78.2, humaneval: 65.4, math: 58.5}, hf_url: "moonshotai/Kimi-Linear-48B-A3B-Instruct" , contextLength: 1048576},
+    { id: 73, name: "Glyph", provider: "zai-org", params: "10B", totalParams: 10, activeParams: 10, prec: "BF16", vram: 20, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 62.4, humaneval: 38.5, math: null}, hf_url: "zai-org/Glyph" , contextLength: 131072},
+    { id: 74, name: "plamo-3-nict-31b-base", provider: "pfnet", params: "32B", totalParams: 32, activeParams: 32, prec: "BF16", vram: 64, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 70.5, humaneval: 48.2, math: 45.8}, hf_url: "pfnet/plamo-3-nict-31b-base" , contextLength: 32768},
+    { id: 75, name: "MiniMax-M2", provider: "MiniMaxAI", params: "230B/10B", totalParams: 230, activeParams: 10, prec: "FP8", vram: 230, variants: [{prec: "NVFP4", vram: 115, note: "Blackwell only"}], type: "moe", contextLength: 196608, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {mmlu: 71.5, humaneval: 58.4, math: 52.3}, hf_url: "MiniMaxAI/MiniMax-M2" },
+    { id: 76, name: "NVIDIA-Nemotron-Nano-12B-v2-VL-BF16", provider: "nvidia", params: "12B", totalParams: 12, activeParams: 12, prec: "BF16", vram: 29, variants: [{prec: "FP8", vram: 14}, {prec: "NVFP4-QAD", vram: 8}], type: "vision", contextLength: 131072, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.5, humaneval: 42.8, math: 38.2}, hf_url: "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16" },
+    { id: 77, name: "DeepSeek-OCR", provider: "deepseek-ai", params: "3B", totalParams: 3, activeParams: 3, prec: "BF16", vram: 6, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "deepseek-ai/DeepSeek-OCR" , contextLength: 8192},
+    { id: 78, name: "PaddleOCR-VL", provider: "PaddlePaddle", params: "0.9B", totalParams: 0.9, activeParams: 0.9, prec: "BF16", vram: 2, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "PaddlePaddle/PaddleOCR-VL" , contextLength: 131072},
+    { id: 82, name: "Qwen3Guard-Gen-8B", provider: "Qwen", params: "8B", totalParams: 8, activeParams: 8, prec: "BF16", vram: 16, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 62.4, humaneval: 38.5, math: 35.2}, hf_url: "Qwen/Qwen3Guard-Gen-8B" , contextLength: 32768},
+    { id: 85, name: "InternVL3_5-8B", provider: "OpenGVLab", params: "8B", totalParams: 8, activeParams: 8, prec: "BF16", vram: 16, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 70.5, humaneval: 48.2, math: null}, hf_url: "OpenGVLab/InternVL3_5-8B" , contextLength: 40960},
+    { id: 87, name: "Seed-OSS-36B-Instruct", provider: "ByteDance-Seed", params: "36B", totalParams: 36, activeParams: 36, prec: "BF16", vram: 72, variants: [], type: "text", contextLength: 32768, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 76.8, humaneval: 55.4, math: 52.1}, hf_url: "ByteDance-Seed/Seed-OSS-36B-Instruct" },
+    { id: 88, name: "NVIDIA-Nemotron-Nano-9B-v2", provider: "nvidia", params: "9B", totalParams: 9, activeParams: 9, prec: "BF16", vram: 18, variants: [{prec: "FP8", vram: 9}, {prec: "NVFP4", vram: 5}], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 66.4, humaneval: 42.5, math: 38.8}, hf_url: "nvidia/NVIDIA-Nemotron-Nano-9B-v2" , contextLength: 131072},
+    { id: 90, name: "gpt-oss-20b", provider: "openai", params: "21B/3.6B", totalParams: 21, activeParams: 3.6, prec: "MXFP4", vram: 16, variants: [], type: "moe", contextLength: 131072, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 72.4, humaneval: 55.2, math: 52.8}, hf_url: "openai/gpt-oss-20b" },
+    { id: 91, name: "gpt-oss-120b", provider: "openai", params: "120B/5.1B", totalParams: 120, activeParams: 5.1, prec: "MXFP4", vram: 96, variants: [{prec: "AMD-FP8", vram: 80}], type: "moe", contextLength: 131072, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 82.5, humaneval: 72.4, math: 68.5}, hf_url: "openai/gpt-oss-120b" },
+    { id: 92, name: "Qwen-Image", provider: "Qwen", params: "20B", totalParams: 20, activeParams: 20, prec: "BF16", vram: 40, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.2, humaneval: null, math: null}, hf_url: "Qwen/Qwen-Image" , contextLength: 8192},
+    { id: 93, name: "Wan2.2-T2V-A14B-Diffusers", provider: "Wan-AI", params: "28B/14B", totalParams: 28, activeParams: 14, prec: "BF16", vram: 56, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "Wan-AI/Wan2.2-T2V-A14B-Diffusers" , contextLength: 32768},
+    { id: 99, name: "ERNIE-4.5-21B-A3B-PT", provider: "baidu", params: "21B/3B", totalParams: 21, activeParams: 3, prec: "BF16", vram: 42, variants: [{prec: "300B-A47B", vram: null, note: "High memory variant"}], type: "moe", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 74.5, humaneval: 52.4, math: 48.2}, hf_url: "baidu/ERNIE-4.5-21B-A3B-PT" , contextLength: 131072},
+    { id: 100, name: "ERNIE-4.5-VL-28B-A3B-PT", provider: "baidu", params: "28B/3B", totalParams: 28, activeParams: 3, prec: "BF16", vram: 56, variants: [{prec: "424B-A47B", vram: null, note: "VL variant"}], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 75.2, humaneval: null, math: null}, hf_url: "baidu/ERNIE-4.5-VL-28B-A3B-PT" , contextLength: 131072},
+    { id: 101, name: "Hunyuan-A13B-Instruct", provider: "tencent", params: "80B/13B", totalParams: 80, activeParams: 13, prec: "BF16", vram: 160, variants: [], type: "moe", gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {mmlu: 78.4, humaneval: 62.5, math: 58.2}, hf_url: "tencent/Hunyuan-A13B-Instruct" , contextLength: 32768},
+    { id: 103, name: "Qwen3-32B", provider: "Qwen", params: "32B", totalParams: 32, activeParams: 32, prec: "BF16", vram: 64, variants: [{prec: "FP8", vram: 32}, {prec: "AWQ", vram: 16}], type: "text", contextLength: 40960, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 76.8, humaneval: 55.4, math: 52.5}, hf_url: "Qwen/Qwen3-32B" },
+    { id: 104, name: "Qwen3-4B", provider: "Qwen", params: "4B", totalParams: 4, activeParams: 4, prec: "BF16", vram: 8, variants: [{prec: "FP8", vram: 4}], type: "text", contextLength: 40960, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 58.4, humaneval: 35.2, math: 32.5}, hf_url: "Qwen/Qwen3-4B" },
+    { id: 106, name: "jina-reranker-m0", provider: "jinaai", params: "2.4B", totalParams: 2.4, activeParams: 2.4, prec: "BF16", vram: 5, variants: [], type: "embedding", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "jinaai/jina-reranker-m0" , contextLength: 32768},
+    { id: 107, name: "Phi-4-mini-instruct", provider: "microsoft", params: "4B", totalParams: 4, activeParams: 4, prec: "BF16", vram: 8, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 62.4, humaneval: 38.5, math: 35.2}, hf_url: "microsoft/Phi-4-mini-instruct" , contextLength: 131072},
+    { id: 109, name: "Qwen2.5-VL-7B-Instruct", provider: "Qwen", params: "7B", totalParams: 7, activeParams: 7, prec: "BF16", vram: 14, variants: [{prec: "AWQ", vram: 7}], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.4, humaneval: 42.5, math: null}, hf_url: "Qwen/Qwen2.5-VL-7B-Instruct" , contextLength: 128000},
+    { id: 112, name: "Llama-3.3-70B-Instruct", provider: "meta-llama", params: "70B", totalParams: 70, activeParams: 70, prec: "BF16", vram: 140, variants: [{prec: "FP8", vram: 70}, {prec: "NVFP4", vram: 35}], type: "text", contextLength: 131072, gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: 86.0, humaneval: 88.4, math: 77.0, mgsm: 91.1}, hf_url: "meta-llama/Llama-3.3-70B-Instruct" },
+    { id: 113, name: "stable-diffusion-3.5-medium", provider: "stabilityai", params: "2.5B", totalParams: 2.5, activeParams: 2.5, prec: "BF16", vram: 5, variants: [], type: "vision", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "stabilityai/stable-diffusion-3.5-medium" , contextLength: 8192},
+    { id: 114, name: "Qwen2.5-32B", provider: "Qwen", params: "32B", totalParams: 32, activeParams: 32, prec: "BF16", vram: 64, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 75.4, humaneval: 52.8, math: 48.2}, hf_url: "Qwen/Qwen2.5-32B" , contextLength: 131072},
+    { id: 115, name: "Llama-3.1-8B-Instruct", provider: "meta-llama", params: "8B", totalParams: 8, activeParams: 8, prec: "BF16", vram: 16, variants: [{prec: "FP8", vram: 8}, {prec: "NVFP4", vram: 4}], type: "text", contextLength: 131072, gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.5, humaneval: 45.2, math: 42.8}, hf_url: "meta-llama/Llama-3.1-8B-Instruct" },
+    { id: 116, name: "stable-audio-open-1.0", provider: "stabilityai", params: "1.2B", totalParams: 1.2, activeParams: 1.2, prec: "BF16", vram: 2, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: null, humaneval: null, math: null}, hf_url: "stabilityai/stable-audio-open-1.0" , contextLength: 8192},
+    { id: 118, name: "GLM-GA", provider: "zai-org", params: "10B", totalParams: 10, activeParams: 10, prec: "BF16", vram: 20, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 62.4, humaneval: 38.5, math: 35.2}, hf_url: "zai-org/GLM-GA" , contextLength: 8192},
+    { id: 119, name: "Mellum2-12B-A2.5B-Instruct", provider: "JetBrains", params: "12B/2.5B", totalParams: 12, activeParams: 2.5, prec: "BF16", vram: 24, variants: [], type: "text", gpuFeasibility: {1: true, 2: true, 4: true, 8: true}, benchmark: {mmlu: 68.2, humaneval: 44.5, math: 48.5}, hf_url: "JetBrains/Mellum2-12B-A2.5B-Instruct" , contextLength: 131072},
+    { id: 79, name: "Mistral-Medium-3.5-128B", provider: "mistralai", params: "128B", totalParams: 128, activeParams: 128, prec: "FP8", vram: 154, variants: [], type: "text", contextLength: 131072, gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {mmlu: 82.4, humaneval: 72.5, math: 68.2}, hf_url: "mistralai/Mistral-Medium-3.5-128B" },
+    { id: 96, name: "Qwen3-235B-A22B-Instruct-2507", provider: "Qwen", params: "235B/22B", totalParams: 235, activeParams: 22, prec: "BF16", vram: 564, variants: [{prec: "FP8", vram: 240}, {prec: "NVFP4", vram: 141}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {mmlu: 87.2, humaneval: 85.4, math: 78.5}, hf_url: "Qwen/Qwen3-235B-A22B-Instruct-2507" },
+    { id: 110, name: "DeepSeek-R1", provider: "deepseek-ai", params: "671B/37B", totalParams: 671, activeParams: 37, prec: "FP8", vram: 805, variants: [{prec: "FP8", vram: 805}, {prec: "NVFP4", vram: 403}], type: "moe", contextLength: 163840, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {mmlu: 90.5, humaneval: 96.2, math: 94.8}, hf_url: "deepseek-ai/DeepSeek-R1" },
+    { id: 120, name: "DeepSeek-V3", provider: "deepseek-ai", params: "671B/37B", totalParams: 671, activeParams: 37, prec: "FP8", vram: 805, variants: [{prec: "NVFP4", vram: 403, note: "Blackwell only"}], type: "moe", contextLength: 163840, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "deepseek-ai/DeepSeek-V3" },
+    { id: 121, name: "DeepSeek-V3.1", provider: "deepseek-ai", params: "671B/37B", totalParams: 671, activeParams: 37, prec: "FP8", vram: 805, variants: [{prec: "NVFP4", vram: 403, note: "Blackwell only"}], type: "moe", contextLength: 163840, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "deepseek-ai/DeepSeek-V3.1" },
+    { id: 122, name: "DeepSeek-V3.2", provider: "deepseek-ai", params: "671B/37B", totalParams: 671, activeParams: 37, prec: "FP8", vram: 805, variants: [{prec: "NVFP4", vram: 403, note: "Blackwell only"}], type: "moe", contextLength: 163840, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "deepseek-ai/DeepSeek-V3.2" },
+    { id: 123, name: "DeepSeek-V3.2-Exp", provider: "deepseek-ai", params: "671B/37B", totalParams: 671, activeParams: 37, prec: "FP8", vram: 805, variants: [], type: "moe", contextLength: 163840, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "deepseek-ai/DeepSeek-V3.2-Exp" },
+    { id: 124, name: "Qwen3-Coder-480B-A35B-Instruct", provider: "Qwen", params: "480B/35B", totalParams: 480, activeParams: 35, prec: "BF16", vram: 1152, variants: [{prec: "FP8", vram: 576}, {prec: "NVFP4", vram: 288, note: "Blackwell only"}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
+    { id: 125, name: "Qwen3-Next-80B-A3B-Instruct", provider: "Qwen", params: "80B/3B", totalParams: 80, activeParams: 3, prec: "BF16", vram: 192, variants: [{prec: "FP8", vram: 96}, {prec: "NVFP4", vram: 48, note: "Blackwell only"}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: true, 4: true, 8: true}, benchmark: {}, hf_url: "Qwen/Qwen3-Next-80B-A3B-Instruct" },
+    { id: 126, name: "Qwen3-VL-235B-A22B-Instruct", provider: "Qwen", params: "235B/22B", totalParams: 235, activeParams: 22, prec: "BF16", vram: 564, variants: [{prec: "FP8", vram: 282}, {prec: "NVFP4", vram: 141, note: "Blackwell only"}], type: "vision", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "Qwen/Qwen3-VL-235B-A22B-Instruct" },
+    { id: 127, name: "Qwen3.5-122B-A10B", provider: "Qwen", params: "122B/10B", totalParams: 122, activeParams: 10, prec: "BF16", vram: 293, variants: [{prec: "FP8", vram: 147}, {prec: "GPTQ-Int4", vram: 74}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {}, hf_url: "Qwen/Qwen3.5-122B-A10B" },
+    { id: 128, name: "Qwen3.5-397B-A17B", provider: "Qwen", params: "397B/17B", totalParams: 397, activeParams: 17, prec: "BF16", vram: 953, variants: [{prec: "NVFP4", vram: 238, note: "Blackwell only"}, {prec: "GPTQ-Int4", vram: 239}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "Qwen/Qwen3.5-397B-A17B" },
+    { id: 129, name: "Qwen2.5-VL-72B-Instruct", provider: "Qwen", params: "72B", totalParams: 72, activeParams: 72, prec: "BF16", vram: 173, variants: [{prec: "AWQ", vram: 43}], type: "vision", contextLength: 128000, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {}, hf_url: "Qwen/Qwen2.5-VL-72B-Instruct" },
+    { id: 130, name: "Llama-4-Scout-17B-16E-Instruct", provider: "meta-llama", params: "109B/17B", totalParams: 109, activeParams: 17, prec: "BF16", vram: 262, variants: [{prec: "FP8", vram: 131}, {prec: "NVFP4", vram: 65, note: "Blackwell only"}], type: "moe", contextLength: 10485760, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {}, hf_url: "meta-llama/Llama-4-Scout-17B-16E-Instruct" },
+    { id: 131, name: "Mistral-Large-3-675B-Instruct-2512", provider: "mistralai", params: "675B/22B", totalParams: 675, activeParams: 22, prec: "FP8", vram: 810, variants: [{prec: "NVFP4", vram: 405}], type: "vision", contextLength: 294912, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "mistralai/Mistral-Large-3-675B-Instruct-2512" },
+    { id: 132, name: "MiMo-V2.5-Pro", provider: "XiaomiMiMo", params: "1T/42B", totalParams: 1000, activeParams: 42, prec: "FP8", vram: 1224, variants: [], type: "moe", contextLength: 1048576, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "XiaomiMiMo/MiMo-V2.5-Pro" },
+    { id: 133, name: "MiMo-V2-Flash", provider: "XiaomiMiMo", params: "309B/15B", totalParams: 309, activeParams: 15, prec: "FP8", vram: 371, variants: [], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "XiaomiMiMo/MiMo-V2-Flash" },
+    { id: 134, name: "MiMo-V2.5", provider: "XiaomiMiMo", params: "311B/15B", totalParams: 311, activeParams: 15, prec: "FP8", vram: 374, variants: [], type: "vision", contextLength: 1048576, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "XiaomiMiMo/MiMo-V2.5" },
+    { id: 135, name: "Ling-2.6-1T", provider: "inclusionAI", params: "1T/50B", totalParams: 1000, activeParams: 50, prec: "FP8", vram: 1200, variants: [], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "inclusionAI/Ling-2.6-1T" },
+    { id: 136, name: "Ling-2.6-flash", provider: "inclusionAI", params: "104B/7.4B", totalParams: 104, activeParams: 7.4, prec: "BF16", vram: 250, variants: [], type: "moe", contextLength: 131072, gpuFeasibility: {1: false, 2: false, 4: true, 8: true}, benchmark: {}, hf_url: "inclusionAI/Ling-2.6-flash" },
+    { id: 137, name: "Ring-1T-FP8", provider: "inclusionAI", params: "1T/50B", totalParams: 1000, activeParams: 50, prec: "FP8", vram: 1200, variants: [], type: "moe", contextLength: 65536, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "inclusionAI/Ring-1T-FP8" },
+    { id: 138, name: "Ring-2.6-1T", provider: "inclusionAI", params: "1T/50B", totalParams: 1000, activeParams: 50, prec: "FP8", vram: 1200, variants: [], type: "moe", contextLength: 131072, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "inclusionAI/Ring-2.6-1T" },
+    { id: 139, name: "Intern-S1", provider: "internlm", params: "241B/28B", totalParams: 241, activeParams: 28, prec: "BF16", vram: 578, variants: [{prec: "FP8", vram: 289}], type: "vision", contextLength: 65536, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "internlm/Intern-S1" },
+    { id: 140, name: "Step-3.5-Flash", provider: "stepfun-ai", params: "196B/11B", totalParams: 196, activeParams: 11, prec: "BF16", vram: 470, variants: [{prec: "FP8", vram: 235}, {prec: "INT4", vram: 118}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "stepfun-ai/Step-3.5-Flash" },
+    { id: 141, name: "Kimi-K2-Instruct", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "FP8", vram: 1200, variants: [], type: "moe", contextLength: 131072, gpuFeasibility: {1: false, 2: false, 4: false, 8: false}, benchmark: {}, hf_url: "moonshotai/Kimi-K2-Instruct" },
+    { id: 142, name: "Kimi-K2-Thinking", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "INT4", vram: 600, variants: [{prec: "NVFP4", vram: 600, note: "Blackwell only"}], type: "moe", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "moonshotai/Kimi-K2-Thinking" },
+    { id: 143, name: "Kimi-K2.5", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "INT4", vram: 714, variants: [{prec: "NVFP4", vram: 600, note: "Blackwell only"}], type: "vision", contextLength: 262144, gpuFeasibility: {1: false, 2: false, 4: false, 8: true}, benchmark: {}, hf_url: "moonshotai/Kimi-K2.5" },
+];
+
+let filteredModels = [...MODELS_DATA];
+let currentGPUFilter = 1;
+let currentQuantFilter = 'all';
+let currentTypeFilter = 'all';
+let currentContextFilter = 0;
+let currentContextLength = 4096;
+
+// Dual check: BOTH VRAM capacity AND quantization format compatibility must pass
+function modelFitsGPU(model, gpus) {
+    if (gpus === 0) return { fits: true, reason: "Any configuration" };
+    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+    const vram = getGPUVRAM(gpus);
+    if (model.vram <= vram && isPrecCompatible(model.prec, gpuType)) return { fits: true };
+    if (model.variants.length > 0) {
+        for (const v of model.variants) {
+            if (v.vram && v.vram <= vram && isPrecCompatible(v.prec || model.prec, gpuType)) return { fits: true, variant: v };
+        }
+    }
+    return { fits: false };
+}
+
+function setGPUFilter(n) {
+    currentGPUFilter = n;
+    document.querySelectorAll('#gpuCountFilter .filter-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.value) === n);
+    });
+    filterModels();
+}
+
+function filterModels() {
+    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+    const quantFilter = document.getElementById('quantFilter')?.value || 'all';
+    const typeFilter = document.getElementById('typeFilter')?.value || 'all';
+    const contextFilter = parseInt(document.getElementById('contextFilter')?.value || '0');
+    const searchQuery = (document.getElementById('searchInput')?.value || '').toLowerCase().trim();
+
+    filteredModels = MODELS_DATA.filter(model => {
+        if (currentGPUFilter > 0) {
+            const fits = modelFitsGPU(model, currentGPUFilter);
+            if (!fits.fits) return false;
+        }
+        if (quantFilter !== 'all') {
+            const norm = normalizePrec(quantFilter);
+            const modelNorm = normalizePrec(model.prec);
+            if (modelNorm === norm) return true;
+            if (model.variants.some(v => normalizePrec(v.prec) === norm)) return true;
+            return false;
+        }
+        if (typeFilter !== 'all' && model.type !== typeFilter) return false;
+        if (contextFilter > 0 && (model.contextLength || 4096) < contextFilter) return false;
+        if (searchQuery && !model.name.toLowerCase().includes(searchQuery) && !model.provider.toLowerCase().includes(searchQuery)) return false;
+        return true;
+    });
+    const sortBy = document.getElementById('sortSelect').value;
+    filteredModels.sort((a, b) => {
+        switch(sortBy) {
+            case 'params': return b.totalParams - a.totalParams;
+            case 'vram': return a.vram - b.vram;
+            case 'contextLength': return (b.contextLength || 4096) - (a.contextLength || 4096);
+            case 'name': return a.name.localeCompare(b.name);
+            case 'mmlu': return (b.benchmark.mmlu || 0) - (a.benchmark.mmlu || 0);
+            case 'humaneval': return (b.benchmark.humaneval || 0) - (a.benchmark.humaneval || 0);
+            default: return 0;
+        }
+    });
+    renderModels();
+    updateStats();
+}
+
+// Badge CSS class only — NOT used for compatibility logic (that's isPrecCompatible)
+function getQuantBadgeClass(prec) {
+    if (prec.includes('BF16')) return 'badge-bf16';
+    if (prec.includes('FP8')) return 'badge-fp8';
+    if (prec.includes('INT4') || prec.includes('GPTQ') || prec.includes('AWQ')) return 'badge-int4';
+    if (prec.includes('NVFP4') || prec.includes('FP4')) return 'badge-nvfp4';
+    if (prec.includes('MXFP4')) return 'badge-mxfp4';
+    if (prec.includes('QAT')) return 'badge-int4';
+    return 'badge-bf16';
+}
+
+function getVerdictClass(model) {
+    const gpus = [1, 2, 4, 8];
+    for (const gpu of gpus) {
+        if (modelFitsGPU(model, gpu).fits) return 'verdict-yes';
+    }
+    return 'verdict-no';
+}
+
+function formatContextLength(tokens) {
+    if (tokens >= 1048576) return (tokens / 1048576).toFixed(1) + 'M';
+    if (tokens >= 1024) return (tokens / 1024).toFixed(0) + 'K';
+    return tokens.toString();
+}
+
+function getContextLengthBadgeClass(tokens) {
+    if (tokens >= 524288) return 'badge-nvfp4';
+    if (tokens >= 131072) return 'badge-fp8';
+    if (tokens >= 32768) return 'badge-bf16';
+    return 'badge-int4';
+}
+
+function renderModels() {
+    const grid = document.getElementById('modelsGrid');
+    const noResults = document.getElementById('noResults');
+    
+    if (filteredModels.length === 0) {
+        grid.classList.add('hidden');
+        noResults.classList.remove('hidden');
+        return;
+    }
+    
+    grid.classList.remove('hidden');
+    noResults.classList.add('hidden');
+    
+    grid.innerHTML = filteredModels.map(model => {
+        const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+        const gpuConfig = GPU_CONFIG[gpuType];
+        const maxVRAM = gpuConfig.usableVram * 8;
+        const vramPercent = Math.min((model.vram / maxVRAM) * 100, 100);
+        const verdictClass = getVerdictClass(model);
+        const contextLen = model.contextLength ? formatContextLength(model.contextLength) : '4K';
+        
+        return `
+        <div class="card p-6 cursor-pointer" onclick="openModal(${model.id})">
+            <div class="flex justify-between items-start mb-4">
+                <div>
+                    <h3 class="font-semibold text-lg">${model.name}</h3>
+                    <p class="text-sm text-[#8888a0]">${model.provider}</p>
+                </div>
+                ${model.tested ? '<span class="badge bg-[#22c55e]/20 text-[#22c55e] border border-[#22c55e]/30">TESTED</span>' : ''}
+            </div>
+            
+            <div class="grid grid-cols-3 gap-2 mb-4">
+                <div class="bg-[#12121a] rounded-lg p-3">
+                    <div class="text-sm text-[#8888a0]">Params</div>
+                    <div class="font-semibold">${model.params}</div>
+                </div>
+                <div class="bg-[#12121a] rounded-lg p-3">
+                    <div class="text-sm text-[#8888a0]">VRAM</div>
+                    <div class="font-semibold">${model.vram} GB</div>
+                </div>
+                <div class="bg-[#12121a] rounded-lg p-3">
+                    <div class="text-sm text-[#8888a0]">Context</div>
+                    <div class="font-semibold">${contextLen}</div>
+                </div>
+            </div>
+            
+            <div class="mb-4">
+                <div class="flex justify-between text-xs text-[#8888a0] mb-1">
+                    <span>GPU Feasibility (${gpuConfig.name})</span>
+                    <span>${model.vram}GB / ${maxVRAM}GB max</span>
+                </div>
+                <div class="gpu-bar">
+                    <div class="gpu-bar-fill ${verdictClass}" style="width: ${vramPercent}%"></div>
+                </div>
+            </div>
+            
+            <div class="flex flex-wrap gap-2 mb-4">
+                <span class="badge ${getQuantBadgeClass(model.prec)}">${model.prec}</span>
+                ${model.variants.slice(0, 2).map(v => `<span class="badge ${getQuantBadgeClass(v.prec)}">${v.prec} ${v.vram ? '@' + v.vram + 'GB' : ''}</span>`).join('')}
+                ${model.variants.length > 2 ? `<span class="badge badge-bf16">+${model.variants.length - 2}</span>` : ''}
+            </div>
+            
+            ${model.benchmark.mmlu !== null ? `
+            <div class="space-y-2">
+                <div>
+                    <div class="flex justify-between text-xs mb-1">
+                        <span class="text-[#8888a0]">MMLU</span>
+                        <span>${model.benchmark.mmlu}%</span>
+                    </div>
+                    <div class="benchmark-bar">
+                        <div class="benchmark-fill" style="width: ${model.benchmark.mmlu}%"></div>
+                    </div>
+                </div>
+                ${model.benchmark.humaneval !== null ? `
+                <div>
+                    <div class="flex justify-between text-xs mb-1">
+                        <span class="text-[#8888a0]">HumanEval</span>
+                        <span>${model.benchmark.humaneval}%</span>
+                    </div>
+                    <div class="benchmark-bar">
+                        <div class="benchmark-fill" style="width: ${model.benchmark.humaneval}%"></div>
+                    </div>
+                </div>
+                ` : ''}
+            </div>
+            ` : '<p class="text-xs text-[#8888a0]">No benchmark data available</p>'}
+            
+            <div class="mt-4 pt-4 border-t border-[#2a2a3a] flex gap-2">
+                ${[1, 2, 4, 8].map(gpu => {
+                    const result = modelFitsGPU(model, gpu);
+                    const vram = getGPUVRAM(gpu);
+                    return `<div class="flex-1 text-center">
+                        <div class="text-xs text-[#8888a0]">${gpu}×</div>
+                        <div class="${result.fits ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-bold text-lg">${result.fits ? '✓' : '✗'}</div>
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>
+    `}).join('');
+}
+
+function updateStats() {
+    const total = MODELS_DATA.length;
+    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+    const gpuConfig = GPU_CONFIG[gpuType];
+    const fitModels = MODELS_DATA.filter(m => modelFitsGPU(m, currentGPUFilter).fits).length;
+    const quantModels = MODELS_DATA.filter(m => m.variants.length > 0).length;
+    const noFit = total - fitModels;
+
+    document.getElementById('totalModels').textContent = total;
+    document.getElementById('fitModels').textContent = fitModels;
+    document.getElementById('quantModels').textContent = quantModels;
+    document.getElementById('noFitModels').textContent = noFit;
+}
+
+function openModal(id) {
+    const model = MODELS_DATA.find(m => m.id === id);
+    if (!model) return;
+    
+    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+    const gpuConfig = GPU_CONFIG[gpuType];
+    
+    const minGPUs = [1, 2, 4, 8].find(gpu => modelFitsGPU(model, gpu).fits) || 'N/A';
+    const minGPUStr = typeof minGPUs === 'number' ? `${minGPUs}× ${gpuConfig.name}` : minGPUs;
+    
+    const contextWarning = `<div class="text-xs text-[#f59e0b] mt-2">⚠️ Higher context lengths require additional KV cache beyond baseline</div>`;
+    
+    const benchmarks = model.benchmark;
+    const benchHTML = Object.entries(benchmarks)
+        .filter(([_, v]) => v !== null)
+        .map(([key, value]) => `
+            <div>
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-[#8888a0]">${key.toUpperCase()}</span>
+                    <span class="font-semibold">${value}%</span>
+                </div>
+                <div class="benchmark-bar">
+                    <div class="benchmark-fill" style="width: ${value}%"></div>
+                </div>
+            </div>
+        `).join('') || '<p class="text-sm text-[#8888a0]">No benchmark data available</p>';
+    
+    const gpuFeasHTML = [1, 2, 4, 8].map(gpu => {
+        const result = modelFitsGPU(model, gpu);
+        const vram = getGPUVRAM(gpu);
+        return `
+            <div class="flex items-center justify-between bg-[#12121a] rounded-lg p-3">
+                <span class="font-medium">${gpu}× ${gpuConfig.name} (${vram}GB usable)</span>
+                <span class="${result.fits ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-bold">
+                    ${result.fits ? '✓ Fits' : '✗ Too Large'}
+                    ${result.variant ? `<span class="text-xs">(${result.variant.prec} variant fits)</span>` : ''}
+                </span>
+            </div>
+        `;
+    }).join('');
+    
+    const hfUrl = `https://huggingface.co/${model.hf_url}`;
+    const vllmUrl = `https://recipes.vllm.ai/${model.hf_url.split('/')[0].charAt(0).toUpperCase() + model.hf_url.split('/')[0].slice(1)}/${model.hf_url.split('/')[1]}`;
+    
+    document.getElementById('modalTitle').textContent = model.name;
+    document.getElementById('modalProvider').textContent = `by ${model.provider}`;
+    document.getElementById('modalContent').innerHTML = `
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
+            <div class="bg-[#12121a] rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-[#6366f1]">${model.params}</div>
+                <div class="text-xs text-[#8888a0] mt-1">Parameters</div>
+            </div>
+            <div class="bg-[#12121a] rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-[#22c55e]">${model.vram} GB (weights only)</div>
+                <div class="text-xs text-[#8888a0] mt-1">VRAM (weights)</div>
+            </div>
+            <div class="bg-[#12121a] rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold text-[#f59e0b]">${minGPUStr}</div>
+                <div class="text-xs text-[#8888a0] mt-1">GPUs Needed</div>
+            </div>
+            <div class="bg-[#12121a] rounded-lg p-4 text-center">
+                <div class="text-2xl font-bold"><span class="badge ${getQuantBadgeClass(model.prec)}">${model.prec}</span></div>
+                <div class="text-xs text-[#8888a0] mt-1">Precision</div>
+            </div>
+        </div>
+
+        <div class="mb-8">
+            <h3 class="font-semibold mb-4">Quantization Variants</h3>
+            <div class="flex flex-wrap gap-2">
+                <span class="badge ${getQuantBadgeClass(model.prec)}">${model.prec} (default)</span>
+                ${model.variants.map(v => `<span class="badge ${getQuantBadgeClass(v.prec)}">${v.prec} ${v.vram ? '@ ' + v.vram + 'GB' : ''} ${v.note ? '(' + v.note + ')' : ''}</span>`).join('')}
+            </div>
+            ${contextWarning}
+        </div>
+
+        <div class="mb-8">
+            <h3 class="font-semibold mb-4">Benchmark Performance</h3>
+            <div class="space-y-4">${benchHTML}</div>
+        </div>
+
+        <div class="mb-8">
+            <h3 class="font-semibold mb-4">GPU Feasibility</h3>
+            <div class="space-y-3">${gpuFeasHTML}</div>
+        </div>
+
+        <div class="flex gap-4">
+            <a href="${hfUrl}" target="_blank" class="flex-1 bg-[#FF9D00] text-black font-semibold py-3 px-6 rounded-lg text-center hover:opacity-90 transition">
+                View on HuggingFace
+            </a>
+            <a href="${vllmUrl}" target="_blank" class="flex-1 bg-[#6366f1] text-white font-semibold py-3 px-6 rounded-lg text-center hover:opacity-90 transition">
+                vLLM Recipe
+            </a>
+        </div>
+    `;
+    
+    document.getElementById('modelModal').classList.remove('hidden');
+}
+
+function closeModal() {
+    document.getElementById('modelModal').classList.add('hidden');
+}
+
+document.getElementById('modelModal').addEventListener('click', (e) => {
+    if (e.target.id === 'modelModal') closeModal();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+});
+
+updateStats();
+renderModels();
+
+function openGPUInfoModal() {
+    document.getElementById('modalProvider').textContent = '';
+    const gpuInfo = `
+        <div class="space-y-8">
+            <div>
+                <h3 class="text-xl font-bold mb-4 gradient-text">GPU Compatibility Snapshot</h3>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
+                        <div class="text-xs text-[#8888a0] mb-1">Ada Lovelace</div>
+                        <div class="font-bold mb-2">L4 24GB</div>
+                        <div class="space-y-2">
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
+                        <div class="text-xs text-[#8888a0] mb-1">Ampere</div>
+                        <div class="font-bold mb-2">A100 80GB</div>
+                        <div class="space-y-2">
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">FP8</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
+                        <div class="text-xs text-[#8888a0] mb-1">Hopper</div>
+                        <div class="font-bold mb-2">H100/H200</div>
+                        <div class="space-y-2">
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
+                        <div class="text-xs text-[#8888a0] mb-1">Blackwell</div>
+                        <div class="font-bold mb-2">B100/B200</div>
+                        <div class="space-y-2">
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">NVFP4</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">MXFP4</span>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
+                                <div class="flex flex-wrap gap-1">
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-3 flex gap-4 text-xs text-[#666680] justify-center">
+                    <span><span class="text-[#4ade80]">●</span> Native hardware tensor core support</span>
+                    <span><span class="text-[#fb923c]">●</span> vLLM software-enabled (no native HW)</span>
+                </div>
+            </div>
+
+            <div>
+                <h3 class="text-xl font-bold mb-4 gradient-text">GPU Specifications</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-[#2a2a3a]">
+                                <th class="text-left py-3 px-2">GPU</th>
+                                <th class="text-left py-3 px-2">Architecture</th>
+                                <th class="text-right py-3 px-2">VRAM</th>
+                                <th class="text-right py-3 px-2">Usable (95%)</th>
+                                <th class="text-left py-3 px-2">Memory</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2 font-medium">L4 24GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">Ada Lovelace (sm_89)</td>
+                                <td class="py-3 px-2 text-right">24 GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">23 GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">GDDR6</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2 font-medium">A100 80GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">Ampere (sm_80)</td>
+                                <td class="py-3 px-2 text-right">80 GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">76 GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">HBM2</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2 font-medium">H100 80GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">Hopper (sm_90)</td>
+                                <td class="py-3 px-2 text-right">80 GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">76 GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">HBM3</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2 font-medium">H200 141GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">Hopper (sm_90)</td>
+                                <td class="py-3 px-2 text-right">141 GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">134 GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">HBM3e</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2 font-medium">B100 192GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">Blackwell (sm_100)</td>
+                                <td class="py-3 px-2 text-right">192 GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">182 GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">HBM3e</td>
+                            </tr>
+                            <tr>
+                                <td class="py-3 px-2 font-medium">B200 192GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">Blackwell (sm_100)</td>
+                                <td class="py-3 px-2 text-right">192 GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">182 GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">HBM3e</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div>
+                <h3 class="text-xl font-bold mb-4 gradient-text">Quantization Compatibility by GPU</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-[#2a2a3a]">
+                                <th class="text-left py-3 px-2">Format</th>
+                                <th class="text-center py-3 px-2">L4<br><span class="text-xs text-[#666680]">Ada</span></th>
+                                <th class="text-center py-3 px-2">A100<br><span class="text-xs text-[#666680]">Ampere</span></th>
+                                <th class="text-center py-3 px-2">H100/H200<br><span class="text-xs text-[#666680]">Hopper</span></th>
+                                <th class="text-center py-3 px-2">B100/B200<br><span class="text-xs text-[#666680]">Blackwell</span></th>
+                                <th class="text-left py-3 px-2">Notes</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2"><span class="badge badge-bf16">BF16</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">Universal baseline - all GPUs support FP16/BF16 natively</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2"><span class="badge badge-fp8">FP8</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">Native on Ada (4th-gen) & Hopper+ via Transformer Engine. Marlin/llm-comp on Ampere</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2"><span class="badge badge-int4">INT4/AWQ/GPTQ</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">AWQ/GPTQ via Marlin kernel - software quantization on all GPUs</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2"><span class="badge badge-nvfp4">NVFP4</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">Blackwell FP4 tensor cores only. NVIDIA ModelOpt checkpoints</td>
+                            </tr>
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2"><span class="badge badge-mxfp4">MXFP4</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">OCP MXFP4 format. Native on Blackwell 5th-gen tensor cores. Marlin kernel on Hopper</td>
+                            </tr>
+                            <tr>
+                                <td class="py-3 px-2"><span class="badge badge-mxfp4">MXFP8</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">Not natively supported on any NVIDIA GPU. Experimental vLLM kernel only</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="mt-3 text-xs text-[#666680]">
+                    <span class="text-[#22c55e]">✓</span> = Supported &nbsp;
+                    <span class="text-[#f59e0b]">✓</span> = Supported (software) &nbsp;
+                    <span class="text-[#ef4444]">✗</span> = Not supported &nbsp;|&nbsp;
+                    <span class="text-[#4ade80]">Native</span> = Hardware tensor cores &nbsp;
+                    <span class="text-[#fb923c]">vLLM SW</span> = Software-enabled
+                </div>
+            </div>
+
+            <div>
+                <h3 class="text-xl font-bold mb-4 gradient-text">Reference Links</h3>
+                <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
+                    <div class="text-xs text-[#8888a0] space-y-2">
+                        <p>Quantization support data sourced from:</p>
+                        <ul class="list-disc list-inside space-y-1">
+                            <li><a href="https://docs.vllm.ai/en/stable/features/quantization/" target="_blank" class="text-[#818cf8] hover:underline">vLLM Quantization Documentation</a> — Official hardware compatibility matrix</li>
+                            <li><a href="https://docs.vllm.ai/en/v0.19.1/api/vllm/model_executor/layers/quantization/" target="_blank" class="text-[#818cf8] hover:underline">vLLM Quantization API Reference</a> — Per-method implementation details</li>
+                            <li><a href="https://www.nvidia.com/en-us/" target="_blank" class="text-[#818cf8] hover:underline">NVIDIA GPU Specifications</a> — Tensor core capabilities per architecture</li>
+                        </ul>
+                        <p class="mt-2 text-[#f59e0b]">⚠️ This data reflects vLLM's current support matrix and may change. Check the links above for updates.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    document.getElementById('modalTitle').textContent = 'GPU & Format Compatibility';
+    document.getElementById('modalContent').innerHTML = gpuInfo;
+    document.getElementById('modelModal').classList.remove('hidden');
+}
+    </script>
+</body>
+</html>
