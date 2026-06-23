@@ -1,8 +1,14 @@
 # vLLM Model Chooser
 
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen?style=flat-square)](https://ylnhari.github.io/vllm-model-chooser)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![vLLM](https://img.shields.io/badge/vLLM-compatible-6366f1?style=flat-square)](https://docs.vllm.ai)
+[![Models](https://img.shields.io/badge/models-108-success?style=flat-square)](index.html)
+[![GitHub Pages](https://img.shields.io/badge/hosted-GitHub%20Pages-222?style=flat-square)](https://ylnhari.github.io/vllm-model-chooser)
+
 Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. Select your GPU, filter by context length and quantization, and instantly see which models fit.
 
-**[Live Demo](https://ylnhari.github.io/vllm-model-chooser)** · **[vLLM Recipes](https://recipes.vllm.ai)**
+[vLLM Recipes](https://recipes.vllm.ai)
 
 ## Features
 
