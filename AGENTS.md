@@ -6,7 +6,7 @@ This file contains technical documentation for maintaining and extending the vLL
 
 Single-file web application (`index.html`) that helps users select vLLM-compatible LLM models based on GPU hardware, VRAM requirements, context length, and quantization options.
 
-**Critical**: VRAM values in `MODELS_DATA` must be **weight-only** (model stored weights only). KV cache is calculated dynamically and displayed separately.
+**Critical**: VRAM values in `MODELS_DATA` must be **weight-only** (model stored weights only). KV cache is NOT included in the `vram` field — the modal displays a warning about additional KV cache overhead for long contexts.
 
 ---
 
@@ -136,7 +136,7 @@ function modelFitsGPU(model, gpus) {
 2. Add canonical name to `GPU_QUANT_COMPAT` entries for compatible GPUs
 3. Add format row to quantization compatibility table in `openGPUInfoModal()`
 4. Add badge CSS class if needed
-5. Add entry in `getQuantBadgeClass()` and `getPrecisionType()`
+5. Add entry in `getQuantBadgeClass()`
 
 #### When vLLM adds software support for an existing format on a new GPU
 1. Add the format's canonical name to that GPU's array in `GPU_QUANT_COMPAT`
@@ -205,31 +205,6 @@ function getGPUVRAM(gpus) {
     const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
     return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);  // 72 is fallback for unknown GPU
 }
-
-function estimateModelArchitecture(activeParams) {
-    const hiddenDim = Math.max(512, Math.ceil(activeParams * 0.125));
-    const numLayers = Math.max(12, Math.ceil(Math.pow(activeParams, 0.5) * 2));
-    const numHeads = Math.max(8, Math.ceil(Math.pow(activeParams, 0.5) * 8));
-    return { hiddenDim, numLayers, numHeads };
-}
-
-function estimateKVCacheVRAM(contextLength, hiddenDim, numLayers, precision, numHeads) {
-    const bytesPerElement = precision === 'FP8' ? 1 : precision === 'INT4' || precision === 'NVFP4' ? 0.5 : 2;
-    const kvCachePerToken = 2 * numHeads * 128 * bytesPerElement;
-    return (kvCachePerToken * numLayers * contextLength) / (1024 * 1024 * 1024);
-}
-
-function calculateTotalVRAM(model, gpus, contextLength = 4096) {
-    const baseVRAM = model.vram;
-    let activeParams = model.activeParams || model.totalParams;
-    const { hiddenDim, numLayers, numHeads } = estimateModelArchitecture(activeParams);
-    const precision = /* extract precision */;
-    const kvCacheVRAM = estimateKVCacheVRAM(contextLength, hiddenDim, numLayers, precision, numHeads);
-    return {
-        total: baseVRAM + kvCacheVRAM,
-        breakdown: { modelWeights: baseVRAM, kvCache: kvCacheVRAM }
-    };
-}
 ```
 
 ### Quantization Format Detection (Badge Styling)
@@ -282,14 +257,10 @@ if (v.vram && v.vram <= vram && isPrecCompatible(v.prec || model.prec, gpuType))
 
 **Cause**: Hardcoded fallback like `|| 72` or `* 72`.
 
-**Fix**: Ensure `getGPUVRAM` reads from `GPU_CONFIG`:
+**Fix**: Ensure `getGPUVRAM` reads from `GPU_CONFIG` and uses a fallback for unknown GPUs:
 ```javascript
-// WRONG
-return gpus * 72;
-return gpus * (config?.usableVram || 72);  // 72 is fallback
-
 // CORRECT
-return gpus * config.usableVram;
+return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);
 ```
 
 ### Bug: VRAM Values Don't Match vLLM Recipes
@@ -299,8 +270,8 @@ return gpus * config.usableVram;
 **Fix**: Calculate weight-only VRAM:
 - BF16: `totalParams * 2`
 - FP8: `totalParams * 1`
-- INT4/NVFP4/MXFP4: `totalParams * 0.5`
-- W4A16: `totalParams * 0.5`
+- INT4/AWQ/GPTQ/NVFP4/MXFP4/W4A16: `totalParams * 0.5`
+- MXFP8: `totalParams * 1`
 
 ### Bug: normalizePrec Returns Wrong Format
 
@@ -359,9 +330,7 @@ curl https://recipes.vllm.ai/{Provider}/{Model}.json | jq '{
 
 ### Step 3: Calculate Weight-Only VRAM
 
-From the recipe, `vram_minimum_gb` includes KV cache overhead at ~4K context.
-
-To get weight-only, use the formula directly:
+Use the formula directly (vLLM recipe `vram_minimum_gb` includes KV cache, so don't rely on it for weight-only):
 - BF16: `totalParams * 2`
 - FP8: `totalParams * 1`
 - INT4/AWQ/GPTQ/NVFP4/MXFP4/W4A16: `totalParams * 0.5`
@@ -436,7 +405,8 @@ When adding a new GPU, update ALL of:
 // 3. Calculate weight-only VRAM:
 // - IF prec is BF16: vram = totalParams * 2
 // - IF prec is FP8: vram = totalParams * 1
-// - IF prec is INT4/NVFP4: vram = totalParams * 0.5
+// - IF prec is MXFP8: vram = totalParams * 1
+// - IF prec is INT4/NVFP4/MXFP4/W4A16: vram = totalParams * 0.5
 
 // 4. Add variants (map from recipe .variants object)
 
@@ -497,7 +467,7 @@ if (prec.includes('FP6')) return 'badge-fp6';
 5. Test NVFP4 variant on B200 — should fit (Blackwell native)
 6. Test MXFP4 variant on H100 — should fit (vLLM SW support)
 7. Test MXFP8 variant on H100 — should NOT fit (unsupported)
-8. Verify KV cache shows separately in modal (not included in VRAM)
+8. Verify modal warns about KV cache overhead for long contexts (not included in VRAM)
 9. Test `FP4+FP8` compound format (DeepSeek models) — treated as NVFP4
 
 ---
@@ -506,19 +476,19 @@ if (prec.includes('FP6')) return 'badge-fp6';
 
 | Component | Location | Notes |
 |-----------|----------|-------|
-| `GPU_CONFIG` | ~Line 254 | GPU hardware specs |
-| `GPU_QUANT_COMPAT` | ~Line 263 | GPU quantization support matrix |
-| `normalizePrec()` | ~Line 272 | Format → canonical name (priority matters!) |
-| `isPrecCompatible()` | ~Line 285 | Quant format compatibility check |
-| `getGPUVRAM()` | ~Line 293 | Must be EXACTLY ONE instance |
-| `MODELS_DATA` | ~Line 298 | 108 models, each with weight-only VRAM |
-| `modelFitsGPU()` | ~Line 416 | Dual check: VRAM + quant compatibility |
-| `filterModels()` | ~Line 436 | Applies all filters and sorts |
-| `getQuantBadgeClass()` | ~Line 523 | Badge CSS only (not compatibility) |
-| `renderModels()` | ~Line 555 | Renders model cards grid |
-| `updateStats()` | ~Line 656 | Updates stats cards |
-| `openModal()` | ~Line 670 | Model detail modal |
-| `openGPUInfoModal()` | ~Line 782 | GPU compatibility info modal |
+| `GPU_CONFIG` | ~Line 232 | GPU hardware specs |
+| `GPU_QUANT_COMPAT` | ~Line 243 | GPU quantization support matrix |
+| `normalizePrec()` | ~Line 255 | Format → canonical name (priority matters!) |
+| `isPrecCompatible()` | ~Line 270 | Quant format compatibility check |
+| `getGPUVRAM()` | ~Line 279 | Must be EXACTLY ONE instance |
+| `MODELS_DATA` | ~Line 286 | 108 models, each with weight-only VRAM |
+| `modelFitsGPU()` | ~Line 405 | Dual check: VRAM + quant compatibility |
+| `filterModels()` | ~Line 426 | Applies all filters and sorts |
+| `getQuantBadgeClass()` | ~Line 467 | Badge CSS only (not for compatibility logic) |
+| `renderModels()` | ~Line 498 | Renders model cards grid |
+| `updateStats()` | ~Line 599 | Updates stats cards |
+| `openModal()` | ~Line 613 | Model detail modal |
+| `openGPUInfoModal()` | ~Line 726 | GPU compatibility info modal |
 
 ---
 
@@ -537,7 +507,7 @@ if (prec.includes('FP6')) return 'badge-fp6';
 ## Key Principles for Data Accuracy
 
 - `GPU_QUANT_COMPAT` lists all formats a GPU can run (native + software). Only completely unsupported formats are excluded.
-- `normalizePrec()` maps variant strings (like "GPTQ-Int4", "NVFP4-QAD", "W4A16") to 5 canonical format categories: BF16, FP8, INT4, NVFP4, MXFP4, MXFP8.
+- `normalizePrec()` maps variant strings (like "GPTQ-Int4", "NVFP4-QAD", "W4A16") to 6 canonical format categories: BF16, FP8, INT4, NVFP4, MXFP4, MXFP8.
 - "Blackwell only" on variant notes is a human hint; the actual enforcement is through `isPrecCompatible()` checking the GPU's format list.
 - Legacy `gpuFeasibility` field on models is unused programmatically — VRAM + quant compatibility are computed at runtime by `modelFitsGPU()`.
 - Context length should be sourced from HuggingFace config.json `max_position_embeddings` (or `model_max_length` / `rope_scaling` as fallback).
