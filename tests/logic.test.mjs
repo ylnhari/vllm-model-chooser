@@ -41,19 +41,20 @@ test('normalizePrec: unknown / empty returns null', () => {
 // ---------------------------------------------------------------------------
 // isPrecCompatible — the quantization gate
 // ---------------------------------------------------------------------------
-test('precSupportLevel: NVFP4 native on Blackwell, software on Hopper/Ampere, unsupported on Ada', () => {
+test('precSupportLevel: NVFP4 is Blackwell-native ONLY (recipes gate it to Blackwell)', () => {
   assert.equal(precSupportLevel('NVFP4', 'B200-192GB'), 'native');
   assert.equal(precSupportLevel('NVFP4', 'B100-192GB'), 'native');
-  assert.equal(precSupportLevel('NVFP4', 'H100-80GB'), 'sw');
-  assert.equal(precSupportLevel('NVFP4', 'A100-80GB'), 'sw');
+  assert.equal(precSupportLevel('NVFP4', 'H100-80GB'), null);
+  assert.equal(precSupportLevel('NVFP4', 'A100-80GB'), null);
   assert.equal(precSupportLevel('NVFP4', 'L4-24GB'), null);
 });
 
-test('isPrecCompatible: NVFP4 compatible everywhere except Ada L4 (software fallback counts)', () => {
+test('isPrecCompatible: NVFP4 only compatible on Blackwell', () => {
   assert.equal(isPrecCompatible('NVFP4', 'B200-192GB'), true);
-  assert.equal(isPrecCompatible('NVFP4', 'H100-80GB'), true);   // vLLM SW
-  assert.equal(isPrecCompatible('NVFP4', 'A100-80GB'), true);   // vLLM SW
-  assert.equal(isPrecCompatible('NVFP4', 'L4-24GB'), false);    // unsupported
+  assert.equal(isPrecCompatible('NVFP4', 'B100-192GB'), true);
+  assert.equal(isPrecCompatible('NVFP4', 'H100-80GB'), false);
+  assert.equal(isPrecCompatible('NVFP4', 'A100-80GB'), false);
+  assert.equal(isPrecCompatible('NVFP4', 'L4-24GB'), false);
 });
 
 test('precSupportLevel: FP8 native on Ada/Hopper/Blackwell, software on Ampere', () => {
@@ -63,14 +64,18 @@ test('precSupportLevel: FP8 native on Ada/Hopper/Blackwell, software on Ampere',
   assert.equal(precSupportLevel('FP8', 'A100-80GB'), 'sw');
 });
 
-test('isPrecCompatible: MXFP4 software-supported on Hopper, native on Blackwell, not on Ada/Ampere', () => {
-  assert.equal(isPrecCompatible('MXFP4', 'H100-80GB'), true);
-  assert.equal(isPrecCompatible('MXFP4', 'B200-192GB'), true);
-  assert.equal(isPrecCompatible('MXFP4', 'A100-80GB'), false);
-  assert.equal(isPrecCompatible('MXFP4', 'L4-24GB'), false);
+test('precSupportLevel: MXFP4 native on Blackwell, software everywhere else (recipes run it on A100)', () => {
+  assert.equal(precSupportLevel('MXFP4', 'B200-192GB'), 'native');
+  assert.equal(precSupportLevel('MXFP4', 'H100-80GB'), 'sw');
+  assert.equal(precSupportLevel('MXFP4', 'A100-80GB'), 'sw');
+  assert.equal(precSupportLevel('MXFP4', 'L4-24GB'), 'sw');
 });
 
-test('isPrecCompatible: MXFP8 only on Blackwell', () => {
+test('precSupportLevel: MXFP8 native on Blackwell only', () => {
+  assert.equal(precSupportLevel('MXFP8', 'B200-192GB'), 'native');
+  assert.equal(precSupportLevel('MXFP8', 'B100-192GB'), 'native');
+  assert.equal(precSupportLevel('MXFP8', 'H100-80GB'), null);
+  assert.equal(precSupportLevel('MXFP8', 'A100-80GB'), null);
   assert.equal(isPrecCompatible('MXFP8', 'B200-192GB'), true);
   assert.equal(isPrecCompatible('MXFP8', 'H100-80GB'), false);
 });
@@ -124,25 +129,18 @@ test('modelFitsGPU: tiny model fits a single L4; huge model does not', () => {
   assert.equal(modelFitsGPU(huge, 8).fits, false);
 });
 
-test('modelFitsGPU: the quant gate blocks an unsupported format even when VRAM is fine', () => {
-  // gpt-oss-20b (id 90): base MXFP4, 16GB. MXFP4 is unsupported on Ada L4.
-  const m = MODELS_DATA.find(x => x.id === 90);
-  assert.equal(m.prec.includes('MXFP4'), true);
-  app.setGpuType('L4-24GB');               // 1x L4 = 22GB usable, so 16GB fits on VRAM...
-  const blocked = modelFitsGPU(m, 1);
-  assert.equal(blocked.fits, false);       // ...but MXFP4 is unsupported on Ada
-  assert.equal(blocked.reason, 'quant');
-  app.setGpuType('H100-80GB');             // MXFP4 is vLLM-software on Hopper
-  const ok = modelFitsGPU(m, 1);
-  assert.equal(ok.fits, true);
-  assert.equal(ok.level, 'sw');
-});
-
-test('modelFitsGPU: selects a lower-precision variant when the base does not fit', () => {
-  // DeepSeek-V3 (id 120): base FP8 805GB, NVFP4 variant 403GB.
+test('modelFitsGPU: the quant gate blocks a Blackwell-only NVFP4 variant on Hopper', () => {
+  // DeepSeek-V3 (id 120): base FP8 805GB, NVFP4 variant 403GB (Blackwell only).
   const m = MODELS_DATA.find(x => x.id === 120);
+  app.setGpuType('H100-80GB');
+  // 8x H100 = 608GB: base FP8 (805) doesn't fit; NVFP4 (403) fits VRAM but is
+  // unsupported on Hopper, so the model is blocked by the quant gate.
+  const blocked = modelFitsGPU(m, 8);
+  assert.equal(blocked.fits, false);
+  assert.equal(blocked.reason, 'quant');
+  // 4x B200 = 728GB: base 805 no, NVFP4 403 fits VRAM AND is native → variant selected.
   app.setGpuType('B200-192GB');
-  const r = modelFitsGPU(m, 4);            // 4x B200 = 728GB: base 805 no, NVFP4 403 yes
+  const r = modelFitsGPU(m, 4);
   assert.equal(r.fits, true);
   assert.equal(r.variant.prec, 'NVFP4');
   assert.equal(r.level, 'native');
@@ -216,6 +214,14 @@ test('data: every precision string normalizes to a known canonical (or null) wit
       // variants may carry exotic notes (e.g. "300B-A47B") that normalize to null — allowed
       assert.doesNotThrow(() => normalizePrec(v.prec));
     }
+  }
+});
+
+test('data: recipe_id, when present, is a same-target path differing only by casing from hf_url', () => {
+  for (const m of MODELS_DATA) {
+    if (!m.recipe_id) continue;
+    assert.notEqual(m.recipe_id, m.hf_url, `${m.name} recipe_id should differ from hf_url when set`);
+    assert.equal(m.recipe_id.toLowerCase(), m.hf_url.toLowerCase(), `${m.name} recipe_id must match hf_url case-insensitively`);
   }
 });
 
