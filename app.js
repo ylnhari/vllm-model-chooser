@@ -364,8 +364,9 @@ function openModal(id) {
     }).join('');
 
     const hfUrl = `https://huggingface.co/${model.hf_url}`;
-    // The recipe page path mirrors the HuggingFace id exactly (case preserved).
-    const vllmUrl = `https://recipes.vllm.ai/${model.hf_url}`;
+    // The recipe path is case-sensitive and occasionally differs from the HF id
+    // (e.g. "Google/" vs "google/"); recipe_id holds the exact path when it does.
+    const vllmUrl = `https://recipes.vllm.ai/${model.recipe_id || model.hf_url}`;
     
     document.getElementById('modalTitle').textContent = model.name;
     document.getElementById('modalProvider').textContent = `by ${model.provider}`;
@@ -499,6 +500,7 @@ function openGPUInfoModal() {
                                 <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
                                 <div class="flex flex-wrap gap-1">
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
                                 </div>
                             </div>
                         </div>
@@ -518,7 +520,7 @@ function openGPUInfoModal() {
                                 <div class="flex flex-wrap gap-1">
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">FP8</span>
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">NVFP4</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
                                 </div>
                             </div>
                         </div>
@@ -539,7 +541,6 @@ function openGPUInfoModal() {
                                 <div class="flex flex-wrap gap-1">
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">NVFP4</span>
                                 </div>
                             </div>
                         </div>
@@ -555,13 +556,13 @@ function openGPUInfoModal() {
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">NVFP4</span>
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">MXFP4</span>
+                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">MXFP8</span>
                                 </div>
                             </div>
                             <div>
                                 <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
                                 <div class="flex flex-wrap gap-1">
                                     <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP8</span>
                                 </div>
                             </div>
                         </div>
@@ -676,26 +677,26 @@ function openGPUInfoModal() {
                             <tr class="border-b border-[#1a1a24]">
                                 <td class="py-3 px-2"><span class="badge badge-nvfp4">NVFP4</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">Native on Blackwell FP4 tensor cores. Marlin FP4 fallback loads on Ampere/Hopper (memory savings, no speedup). NVIDIA ModelOpt checkpoints</td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">Blackwell FP4 tensor cores only — vLLM recipes gate NVFP4 checkpoints to Blackwell. NVIDIA ModelOpt format</td>
                             </tr>
                             <tr class="border-b border-[#1a1a24]">
                                 <td class="py-3 px-2"><span class="badge badge-mxfp4">MXFP4</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">OCP MXFP4 format. Native on Blackwell 5th-gen tensor cores. Marlin kernel on Hopper</td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">OCP MXFP4 format (e.g. gpt-oss). Native on Blackwell; software dequant elsewhere — recipes note it fits on a single A100</td>
                             </tr>
                             <tr>
                                 <td class="py-3 px-2"><span class="badge badge-mxfp8">MXFP8</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
                                 <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">Not natively supported on any NVIDIA GPU. Experimental vLLM kernel only</td>
+                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">OCP MXFP8 microscaling format. Native on Blackwell MX tensor cores (B200/B300); unsupported on earlier GPUs</td>
                             </tr>
                         </tbody>
                     </table>

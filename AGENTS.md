@@ -19,6 +19,34 @@ Static, no-build web application that helps users select vLLM-compatible LLM mod
 
 ---
 
+## Sources of Truth (READ THIS before changing any data)
+
+**Trust these sources, in this priority order. Do NOT use model knowledge, blog posts, or general web search to set compatibility or specs.** A real regression happened this way: a web claim about a "Marlin FP4 fallback" led to NVFP4 being marked Hopper/Ampere-compatible, but every recipe says NVFP4 is *for Blackwell GPUs*. **When a source disagrees with your prior, the recipe/vLLM-docs win.** Verify, don't assume.
+
+| Data | Authoritative source | How to read it |
+|------|----------------------|----------------|
+| Model inventory | `recipes.vllm.ai/models.json` | `hf_id` = **case-sensitive** recipe path (e.g. `Google/gemma-4-12B-it`, not `google/`). `json` = recipe URL. |
+| Model specs (params, active, context, dense/MoE) | `recipes.vllm.ai/<hf_id>.json` → `.model` | `parameter_count`, `active_parameters`, `context_length`, `architecture`. Cross-check context with HuggingFace `config.json` (`max_position_embeddings`). |
+| Variants & precisions | recipe `.variants.*` | `precision`, `vram_minimum_gb` (**KV-INCLUSIVE — never copy into our weight-only `vram`**), `description` (free-text hardware hints, e.g. "for Blackwell GPUs", "fits on 1xA100"). There is **no structured per-variant GPU list** — the hardware hints live in `description` + `hardware_overrides` keys (`blackwell`/`hopper`/`amd`). |
+| Quant × GPU compatibility (`GPU_QUANT_COMPAT`) | [vLLM quantization "supported hardware" docs](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware/) | The canonical method × architecture matrix. Corroborate per-model with recipe variant `description` + `hardware_overrides`. |
+| GPU hardware specs (`GPU_CONFIG`) | NVIDIA datasheets | VRAM / arch / sm / memory. Recipe `recommended_command.hardware_profile.description` gives authoritative blurbs ("NVIDIA H200 SXM 141 GB HBM3e"). |
+| Weight-only VRAM (our `vram`) | **computed** | `totalParams × bytesPerParam` (see formula below). Never copy the recipe's KV-inclusive `vram_minimum_gb`. |
+| Benchmarks | curated | Hand-maintained; the generator preserves them. |
+
+**Verified facts (re-confirm against sources if you touch them):**
+- NVFP4 → **Blackwell native only** (DeepSeek-R1, Llama-3.3-70B, MiniMax-M2.7 recipes all say "for Blackwell GPUs").
+- MXFP4 → native on Blackwell, **software elsewhere incl. A100** (gpt-oss-120b: "fits on 1xA100 80GB").
+- MXFP8 → **native on Blackwell MX tensor cores only** (MiniMax-M3: "Blackwell ... for native MX tensor core").
+- FP8 → native on Ada/Hopper/Blackwell, **software (Marlin) on Ampere**.
+- INT8/INT4/AWQ/GPTQ → software on all listed GPUs.
+
+**Where these live & how to update:**
+- `GPU_CONFIG` and `GPU_QUANT_COMPAT` are **hand-maintained inside `scripts/sync-data.mjs`** (no recipe carries them). Edit them there *with a source citation in the comment*, then run the generator.
+- `node scripts/sync-data.mjs` rebuilds `data.js` (context, variant precisions, `recipe_id` casing) preserving curated fields. `npm run factcheck` audits the result. `npm test` validates logic. Run all three after any change.
+- `recipe_id` is set per-model only when the recipe path casing differs from `hf_url` (HuggingFace link uses `hf_url`; recipe link uses `recipe_id || hf_url`).
+
+---
+
 ## GPU Quantization Compatibility System
 
 This is the most architecturally significant part of the application. Models are checked against BOTH available VRAM AND quantization format compatibility when determining if a model fits a GPU configuration.
