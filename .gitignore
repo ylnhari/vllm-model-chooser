@@ -13,3 +13,6 @@ Thumbs.db
 __pycache__/
 *.pyc
 *.pyo
+
+# Node
+node_modules/

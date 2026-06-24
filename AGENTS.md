@@ -4,9 +4,18 @@ This file contains technical documentation for maintaining and extending the vLL
 
 ## Application Overview
 
-Single-file web application (`index.html`) that helps users select vLLM-compatible LLM models based on GPU hardware, VRAM requirements, context length, and quantization options.
+Static, no-build web application that helps users select vLLM-compatible LLM models based on GPU hardware, VRAM requirements, context length, and quantization options. Served by any static server (`python3 -m http.server`).
 
-**Critical**: VRAM values in `MODELS_DATA` must be **weight-only** (model stored weights only). KV cache is NOT included in the `vram` field — the modal displays a warning about additional KV cache overhead for long contexts.
+**File layout** (split as of the v1 refactor — sections further down may still say "single-file"; mentally substitute these files):
+- `index.html` — markup + styles; loads `data.js` then `app.js` as plain globals (no modules/bundler).
+- `data.js` — `GPU_CONFIG`, `GPU_QUANT_COMPAT`, `MODELS_DATA`. **Auto-generated** by `scripts/sync-data.mjs` from live vLLM recipes; curated fields (benchmark, weight-only vram, type, tested) are preserved across syncs. Don't hand-edit recipe-sourced fields (contextLength, variant precisions) — re-run the generator.
+- `app.js` — all logic + rendering.
+- `scripts/sync-data.mjs` (regenerate data) · `scripts/factcheck.mjs` (audit vs recipes — `npm run factcheck`).
+- `tests/` — `npm test` (Node built-in runner, no deps). Run after any logic/data change.
+
+**`GPU_QUANT_COMPAT` is now a tri-state map**, not an array: `{ CANONICAL: 'native' | 'sw' }` — present key = supported (`native` = HW tensor cores, `sw` = vLLM software path), absent = unsupported. `precSupportLevel(prec, gpuType)` returns `'native' | 'sw' | null`; `isPrecCompatible` is just `precSupportLevel(...) !== null`.
+
+**Critical**: VRAM values in `MODELS_DATA` must be **weight-only** (model stored weights only). KV cache is NOT included in the `vram` field — `app.js` has an optional, clearly-labelled KV-cache *estimate* (`estKVCacheGB`, a coarse params×tokens proxy) the user can toggle into the fit check.
 
 ---
 
