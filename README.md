@@ -13,7 +13,9 @@ Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. 
 ## Features
 
 - **6 GPU types**: L4, A100, H100, H200, B100, B200 — with 1/2/4/8× multi-GPU
-- **VRAM + quantization dual check**: Models are filtered by BOTH weight VRAM AND quantization format compatibility (NVFP4 on A100? ✗. NVFP4 on B200? ✓)
+- **VRAM + quantization dual check**: Models are filtered by BOTH weight VRAM AND quantization format compatibility, tri-state native/software/unsupported (MXFP4 on A100? ✗. MXFP4 on H100? software ✓. NVFP4 native only on Blackwell)
+- **Optional KV-cache estimate**: factor an approximate context-length KV footprint into the fit check
+- **Shareable URLs**: filter state is reflected into query params
 - **108 models** with detailed specs: params, weight-only VRAM, context length, quantization variants, benchmarks
 - **GPU compatibility info modal**: Native HW vs vLLM SW support per format, full GPU specs table, quantization compatibility matrix
 - **vLLM Recipe & HuggingFace links** per model
@@ -34,32 +36,50 @@ Or use the provided script:
 ## Project Structure
 
 ```
-modal-chooser/
-├── index.html       # Single-file application (all HTML/CSS/JS)
+vllm-model-chooser/
+├── index.html       # Markup + styles; loads data.js then app.js
+├── data.js          # GPU_CONFIG, GPU_QUANT_COMPAT, MODELS_DATA (auto-generated)
+├── app.js           # Application logic + rendering
+├── scripts/
+│   ├── sync-data.mjs  # Rebuild data.js from live vLLM recipes (npm run factcheck's sibling)
+│   └── factcheck.mjs  # Audit data.js against live recipes (npm run factcheck)
+├── tests/           # Node built-in test runner (npm test)
 ├── AGENTS.md        # Maintenance guide for AI agents
 ├── README.md        # This file
 └── start-server.sh  # Convenience dev server script
 ```
 
+## Development
+
+```bash
+npm test           # logic + data-integrity tests (no dependencies)
+npm run factcheck  # audit model data against live vLLM recipes
+node scripts/sync-data.mjs   # regenerate data.js from recipes
+```
+
 ## GPU Quantization Compatibility
+
+Tri-state: **Native** = hardware tensor cores · **vLLM SW** = software path (loads, no speedup) · ✗ = unsupported.
 
 | Format | L4 (Ada) | A100 (Ampere) | H100/H200 (Hopper) | B100/B200 (Blackwell) |
 |--------|----------|---------------|--------------------|---------------------|
 | BF16 | Native ✓ | Native ✓ | Native ✓ | Native ✓ |
 | FP8 | Native ✓ | vLLM SW ✓ | Native ✓ | Native ✓ |
-| INT4/AWQ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ |
-| NVFP4 | ✗ | ✗ | ✗ | Native ✓ |
+| INT8/INT4/AWQ/GPTQ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ |
+| NVFP4 | ✗ | vLLM SW ✓ | vLLM SW ✓ | Native ✓ |
 | MXFP4 | ✗ | ✗ | vLLM SW ✓ | Native ✓ |
 | MXFP8 | ✗ | ✗ | ✗ | vLLM SW ✓ |
 
 ## GPU Specs
 
+Usable VRAM = `floor(physical × 0.95)`.
+
 | GPU | VRAM | Usable (95%) | Architecture | Memory |
 |-----|------|-------------|--------------|--------|
-| L4 24GB | 24 GB | 23 GB | Ada Lovelace (sm_89) | GDDR6 |
-| A100 80GB | 80 GB | 76 GB | Ampere (sm_80) | HBM2 |
+| L4 24GB | 24 GB | 22 GB | Ada Lovelace (sm_89) | GDDR6 |
+| A100 80GB | 80 GB | 76 GB | Ampere (sm_80) | HBM2e |
 | H100 80GB | 80 GB | 76 GB | Hopper (sm_90) | HBM3 |
-| H200 141GB | 141 GB | 134 GB | Hopper (sm_90) | HBM3e |
+| H200 141GB | 141 GB | 133 GB | Hopper (sm_90) | HBM3e |
 | B100 192GB | 192 GB | 182 GB | Blackwell (sm_100) | HBM3e |
 | B200 192GB | 192 GB | 182 GB | Blackwell (sm_100) | HBM3e |
 

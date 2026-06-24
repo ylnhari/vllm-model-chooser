@@ -1,0 +1,13 @@
+{
+  "name": "vllm-model-chooser",
+  "version": "1.0.0",
+  "description": "Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "factcheck": "node scripts/factcheck.mjs",
+    "serve": "python3 -m http.server 5000"
+  },
+  "license": "MIT"
+}
