@@ -8,7 +8,7 @@
 
 Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. Select your GPU, filter by context length and quantization, and instantly see which models fit.
 
-[vLLM Recipes](https://recipes.vllm.ai)
+[vLLM Recipes](https://recipes.vllm.ai)                ,                [vLLM  Model Chooser Tool Web Page](https://ylnhari.github.io/vllm-model-chooser)
 
 ## Features
 
