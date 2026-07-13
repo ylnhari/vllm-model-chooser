@@ -183,6 +183,21 @@ test('estKVCacheGB: zero when disabled, positive and monotonic in context', () =
   assert.ok(a > 0 && b > a, 'KV should grow with context length');
 });
 
+test('estKVCacheGB: uses exact attention geometry (kvBytesPerToken) when present', () => {
+  const m = MODELS_DATA.find(x => x.kvBytesPerToken);
+  assert.ok(m, 'expected at least one model with synced KV geometry');
+  // geometry path is exact: bytes/token × tokens / 1e9, independent of totalParams
+  assert.equal(estKVCacheGB(m, 100000), m.kvBytesPerToken * 100000 / 1e9);
+  assert.equal(estKVCacheGB(m, 0), 0);
+});
+
+test('data: kvBytesPerToken, when present, is a positive number', () => {
+  for (const m of MODELS_DATA) {
+    if (m.kvBytesPerToken == null) continue;
+    assert.ok(typeof m.kvBytesPerToken === 'number' && m.kvBytesPerToken > 0, `${m.name} kvBytesPerToken`);
+  }
+});
+
 test('modelFitsGPU: enabling the KV estimate can turn a fit into a non-fit', () => {
   app.setGpuType('H100-80GB');
   // find a model that fits on 1 GPU on weights alone but is close to the limit

@@ -98,6 +98,8 @@ function emit(models) {
       `benchmark: ${bench}`,
       `hf_url: ${JSON.stringify(m.hf_url)}`,
     ];
+    // Weight-only-KV footprint per token (bytes, FP16), from HF attention geometry.
+    if (m.kvBytesPerToken) fields.push(`kvBytesPerToken: ${m.kvBytesPerToken}`);
     // recipe_id is set only when the recipe path casing differs from hf_url
     // (e.g. HuggingFace "google/..." vs recipe "Google/..."); the recipe link
     // is case-sensitive, the HuggingFace link uses hf_url.
@@ -143,12 +145,54 @@ function pureWeightVram(totalParams, prec) {
   return Math.max(1, Math.round(totalParams * bpp));
 }
 
+// Exact-ish KV-cache footprint per token (bytes), computed from the model's
+// HuggingFace config.json attention geometry. FP16 KV assumed (2 bytes/elem).
+//   KV/token = (full-attention layers) x 2 (K+V) x num_kv_heads x head_dim x 2
+// Handles the three cases that matter for these models:
+//   - hybrid linear/full attention (layer_types): only 'full_attention' layers cache KV
+//   - GQA/MHA: num_key_value_heads x head_dim (exact)
+//   - MLA (DeepSeek): approximated via the config's compressed kv-head dims
+// Returns null when geometry is unavailable (gated repo / missing fields) so the
+// app falls back to its coarse params-based proxy. VL/multimodal configs nest the
+// text stack under text_config/language_config/llm_config — unwrap that first.
+function kvBytesPerTokenFromConfig(rawCfg) {
+  const c = (rawCfg && (rawCfg.text_config || rawCfg.language_config || rawCfg.llm_config)) || rawCfg || {};
+  const layersAll = c.num_hidden_layers ?? c.num_layers;
+  if (!layersAll) return null;
+  let layers = layersAll;
+  if (Array.isArray(c.layer_types)) {
+    const full = c.layer_types.filter(t => String(t).includes('full')).length;
+    if (full > 0) layers = full;                 // hybrid: linear-attn layers hold no KV cache
+  }
+  // MLA (DeepSeek-style): the cache is a single compressed latent (kv_lora_rank) plus
+  // the rope key per token per layer — NOT num_heads × head_dim, and NOT doubled for
+  // K/V (the latent is shared). Using the GQA formula here overcounts ~20×.
+  if (c.kv_lora_rank) {
+    return Math.round(layers * (c.kv_lora_rank + (c.qk_rope_head_dim || 0)) * 2);
+  }
+  // GQA / MHA: separate K and V, each num_kv_heads × head_dim, FP16.
+  const nHeads = c.num_attention_heads;
+  const kvHeads = c.num_key_value_heads ?? nHeads;
+  let headDim = c.head_dim;
+  if (!headDim && c.hidden_size && nHeads) headDim = c.hidden_size / nHeads;
+  if (!kvHeads || !headDim) return null;
+  return Math.round(layers * 2 * kvHeads * headDim * 2);
+}
+
+async function fetchConfigKV(hfUrl) {
+  try {
+    const res = await fetch(`https://huggingface.co/${hfUrl}/resolve/main/config.json`);
+    if (!res.ok) return null;                     // 401 gated / 404 → fall back to proxy
+    return kvBytesPerTokenFromConfig(await res.json());
+  } catch { return null; }
+}
+
 async function main() {
   const models = loadCurrentModels();
   const inventory = await fetchJson(`${BASE}/models.json`);
   const byId = new Map(inventory.map(r => [r.hf_id.toLowerCase(), r]));
 
-  const changes = { context: [], variants: [], gpuFeasibilityRemoved: 0, recipeIds: [], vram: [] };
+  const changes = { context: [], variants: [], gpuFeasibilityRemoved: 0, recipeIds: [], vram: [], kv: [] };
 
   const queue = [...models];
   async function worker() {
@@ -161,6 +205,11 @@ async function main() {
       // (case-sensitive) recipe link doesn't 404 (e.g. "Google/" vs "google/").
       if (entry.hf_id !== m.hf_url) { m.recipe_id = entry.hf_id; changes.recipeIds.push(`${m.hf_url} -> ${entry.hf_id}`); }
       else if ('recipe_id' in m) delete m.recipe_id;
+      // KV-cache geometry from HuggingFace config.json (best-effort; null on gated/missing).
+      const kv = await fetchConfigKV(m.hf_url);
+      if (kv && kv !== m.kvBytesPerToken) { changes.kv.push({ name: m.name, to: kv }); m.kvBytesPerToken = kv; }
+      else if (!kv && 'kvBytesPerToken' in m) { /* keep last-known geometry if config now unavailable */ }
+
       let j;
       try { j = await fetchJson(BASE + entry.json); } catch { continue; }
       const mod = j.model || {};
@@ -213,6 +262,7 @@ async function main() {
   changes.variants.forEach(c => console.log(`    - ${c.name}: +${c.prec} @${c.vram}GB`));
   console.log(`  weight-only VRAM normalised: ${changes.vram.length}`);
   changes.vram.forEach(c => console.log(`    - ${c.name}: ${c.from} → ${c.to}GB`));
+  console.log(`  KV geometry set (bytes/token): ${changes.kv.length}`);
   console.log(`  recipe_id (case) set: ${changes.recipeIds.length}`);
   changes.recipeIds.forEach(c => console.log(`    - ${c}`));
 

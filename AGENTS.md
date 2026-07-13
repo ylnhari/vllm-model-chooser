@@ -48,6 +48,77 @@ Static, no-build web application that helps users select vLLM-compatible LLM mod
 
 ---
 
+## Extending the tool (READ before adding models / precisions / GPUs / architectures)
+
+The golden rule: **`data.js` is generated, not hand-authored.** You add the minimum
+seed to `MODELS_DATA` (or edit a table in `scripts/sync-data.mjs`), then let the
+generator fill in everything derivable, then verify. Always finish with the loop:
+
+```
+node scripts/sync-data.mjs      # rebuild data.js from live recipes + HF configs
+npm run factcheck               # must end "Total discrepancies: 0"
+npm test                        # must be all-pass
+```
+
+`normalizePrec` + `BYTES_PER_PARAM` live in **`shared/prec.mjs`** and are imported by
+both scripts. `app.js` keeps a byte-identical copy of `normalizePrec` (it runs as a
+classic browser `<script>`, no ESM import); a drift-guard test fails if the two
+diverge, so **edit `shared/prec.mjs` and mirror the change into `app.js`**.
+
+### Add a new MODEL
+1. Confirm it exists in the source of truth: it must appear in
+   [`recipes.vllm.ai/models.json`](https://recipes.vllm.ai/models.json) (`factcheck`
+   flags "not in inventory" otherwise).
+2. Append a seed row to `MODELS_DATA` in `data.js` with a fresh unique `id` and the
+   fields you can't derive: `name`, `provider`, `params`, `totalParams`,
+   `activeParams`, base `prec`, `type`, `hf_url` (the case-sensitive HF path). Set
+   `vram`/`variants`/`contextLength` to rough placeholders — the generator overwrites
+   the derivable ones.
+3. Run `node scripts/sync-data.mjs`. It fills `contextLength`, adds recipe variant
+   precisions, sets `recipe_id` casing, **computes weight-only `vram`** for pure
+   precisions, and **computes `kvBytesPerToken`** from the HF `config.json`.
+4. Only these stay curated (the generator never overwrites them): `benchmark`
+   (recipes carry no eval data — hand-source from the model card, or leave `null`;
+   the UI labels them indicative), `type`, `tested`, and `vram` **only for
+   mixed-precision** models (MXFP4/`FP4+FP8`/`AMD-FP8`, where the naive formula is
+   wrong — e.g. gpt-oss).
+
+### Add a new QUANTIZATION format
+1. `shared/prec.mjs`: add the recognizer to `normalizePrec` **before** any generic
+   substring it could be mistaken for (specific-before-generic is the whole contract —
+   see the MXFP8-vs-FP8 tests), and add its weight bytes/param to `BYTES_PER_PARAM`.
+   Mirror the `normalizePrec` change into `app.js`.
+2. `scripts/sync-data.mjs → GPU_QUANT_COMPAT`: add the format key to every GPU that
+   supports it, `'native'` (HW tensor cores) or `'sw'` (vLLM software/dequant path),
+   **with a source citation** (vLLM "supported hardware" docs + recipe variant
+   `description`/`hardware_overrides`). Absent key = unsupported.
+3. `app.js`: add a `badge-<fmt>` CSS class mapping in `getQuantBadgeClass`, add the
+   format to `FORMAT_ORDER`/`FORMAT_NOTE` in `openGPUInfoModal` (the modal renders
+   from the data, so it picks up the new column/row automatically), and add the
+   `<option>` to `#quantFilter` in `index.html`.
+4. Regenerate + `factcheck` + `test`. Add/adjust a `normalizePrec`/`precSupportLevel`
+   test for the new format.
+
+### Add a new GPU
+Edit **both** `GPU_CONFIG` and `GPU_QUANT_COMPAT` in `scripts/sync-data.mjs` (not
+`data.js` — it's generated), keep `usableVram = floor(vram * 0.95)`, add a `<option>`
+to `#gpuTypeSelect` in `index.html`, regenerate, verify. The info-modal table and
+snapshot cards are data-driven and update themselves.
+
+### Add a new ARCHITECTURE (KV-cache geometry)
+`kvBytesPerToken` is computed in `kvBytesPerTokenFromConfig()` (sync-data.mjs) from the
+HF `config.json`; the app multiplies it by context tokens for the KV estimate, falling
+back to a coarse params proxy when it's `null` (gated repos, no standard config).
+Current handling: **GQA/MHA** (`num_key_value_heads × head_dim`, ×2 for K/V, FP16),
+**MLA** (`kv_lora_rank + qk_rope_head_dim`, single latent — DeepSeek), and **hybrid
+linear/full** (`layer_types` → count only `full_attention` layers). If a new attention
+type caches KV differently (e.g. a linear/SSM scheme that doesn't expose `layer_types`,
+or a new latent-attention variant), add a branch there keyed on a distinctive config
+field or `model_type`, then re-sync and spot-check the `@128K` GB values look sane
+(dense-70B ≈ 40GB, MLA-671B ≈ 9GB, mostly-linear ≈ single-digit GB).
+
+---
+
 ## GPU Quantization Compatibility System
 
 This is the most architecturally significant part of the application. Models are checked against BOTH available VRAM AND quantization format compatibility when determining if a model fits a GPU configuration.

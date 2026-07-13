@@ -40,14 +40,15 @@ function getGPUVRAM(gpus) {
     return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);
 }
 
-// Rough KV-cache estimate (GB). The dataset has no per-model attention geometry
-// (layers / KV-heads / head-dim), so this is a deliberately coarse proxy:
-// KV scales with total parameters and sequence length. Calibrated so a ~70B model
-// at 128K ≈ ~30GB (FP16 KV). It IGNORES GQA/MLA and is clearly labelled an estimate
-// in the UI. Returns 0 when the KV estimate is disabled (tokens = 0).
-const KV_GB_PER_PARAM_PER_TOKEN = 3.3e-6;   // GB per (B-params × token)
+// KV-cache estimate (GB), FP16 KV. When the model carries `kvBytesPerToken` (exact
+// attention geometry synced from its HuggingFace config.json — full-attention layers
+// × KV-heads × head-dim, counting only KV-bearing layers for hybrid/linear models),
+// this is accurate. Otherwise it falls back to a coarse params×tokens proxy for
+// models whose geometry couldn't be fetched (gated repos). Returns 0 when disabled.
+const KV_GB_PER_PARAM_PER_TOKEN = 3.3e-6;   // GB per (B-params × token) — fallback proxy only
 function estKVCacheGB(model, tokens) {
     if (!tokens) return 0;
+    if (model.kvBytesPerToken) return model.kvBytesPerToken * tokens / 1e9;
     return model.totalParams * tokens * KV_GB_PER_PARAM_PER_TOKEN;
 }
 // Selected context length (tokens) for the KV estimate; 0 = estimate off.
@@ -327,8 +328,11 @@ function openModal(id) {
     
     const kvTokens = getKVContextTokens();
     const kvGB = estKVCacheGB(model, kvTokens);
+    const kvBasis = model.kvBytesPerToken
+        ? `FP16 KV from the model's attention geometry (full-attention layers × KV-heads × head-dim)`
+        : `a rough params×tokens proxy — geometry wasn't available for this model, so it ignores GQA/MLA and over-estimates MoE`;
     const contextWarning = kvTokens
-        ? `<div class="text-xs text-[#f59e0b] mt-2">⚠️ KV-cache estimate at ${formatContextLength(kvTokens)} ctx ≈ <strong>+${kvGB.toFixed(1)} GB</strong> on top of weights (rough — a params×tokens proxy that ignores GQA/MLA and over-estimates MoE models, whose KV tracks attention depth, not total params).</div>`
+        ? `<div class="text-xs text-[#f59e0b] mt-2">⚠️ KV-cache estimate at ${formatContextLength(kvTokens)} ctx ≈ <strong>+${kvGB.toFixed(1)} GB</strong> on top of weights (${kvBasis}).</div>`
         : `<div class="text-xs text-[#f59e0b] mt-2">⚠️ VRAM shown is weights only. Enable the KV-cache estimate (top filter bar) to factor in context length.</div>`;
     
     const benchmarks = model.benchmark;

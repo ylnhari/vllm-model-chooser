@@ -196,7 +196,7 @@
                     </select>
                 </div>
                 <div class="flex items-center gap-2">
-                    <span class="text-sm text-[#8888a0] font-medium" title="Adds an estimated KV-cache footprint (rough params×tokens proxy — ignores GQA/MLA, over-estimates MoE) to the weight VRAM when checking fit.">KV est:</span>
+                    <span class="text-sm text-[#8888a0] font-medium" title="Adds an estimated FP16 KV-cache footprint to the weight VRAM when checking fit. Computed from each model's attention geometry (layers × KV-heads × head-dim) where available; a coarse params×tokens proxy for models whose geometry couldn't be fetched.">KV est:</span>
                     <select id="kvContextSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
                         <option value="0">Off</option>
                         <option value="8192">8K ctx</option>

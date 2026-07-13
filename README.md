@@ -95,8 +95,9 @@ All factual data is derived from the sources below. **Trust these sources, in th
 | **Variants & precisions** | same recipe → `.variants.*` | `precision`, `vram_minimum_gb` (**KV-INCLUSIVE — do not copy into our weight-only `vram`**), and `description` (carries hardware hints like "for Blackwell GPUs", "fits on 1xA100"). |
 | **Quantization × GPU compatibility** (`GPU_QUANT_COMPAT`) | [vLLM quantization "supported hardware" docs](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware/) | Primary matrix of method × architecture. Corroborate per-model with the recipe variant `description` and `hardware_overrides` keys (`blackwell` / `hopper` / `amd`). |
 | **GPU hardware specs** (`GPU_CONFIG`) | NVIDIA datasheets | VRAM, architecture, sm version, memory type. The recipe `recommended_command.hardware_profile.description` gives authoritative blurbs (e.g. "NVIDIA H200 SXM 141 GB HBM3e"). |
-| **Weight-only VRAM** (our `vram` field) | computed, not copied | `totalParams × bytesPerParam` — BF16 ×2, FP8/MXFP8/INT8 ×1, INT4/NVFP4/MXFP4/W4A16 ×0.5. Recipe `vram_minimum_gb` includes KV cache, so don't use it directly. |
-| **Benchmarks** | curated (model cards / leaderboards) | Hand-maintained; preserved across syncs — the generator never overwrites them. |
+| **Weight-only VRAM** (our `vram` field) | computed, not copied | `totalParams × bytesPerParam` — BF16 ×2, FP8/MXFP8/INT8 ×1, INT4/NVFP4/MXFP4/W4A16 ×0.5. Recipe `vram_minimum_gb` includes KV cache, so don't use it directly. Mixed-precision (MXFP4/`FP4+FP8`/`AMD-FP8`) stays curated — the naive formula understates it. |
+| **KV-cache geometry** (`kvBytesPerToken`) | HuggingFace `config.json` | `layers × 2 × num_kv_heads × head_dim × 2B` (GQA/MHA); `layers × (kv_lora_rank + qk_rope_head_dim) × 2B` (MLA); count only `full_attention` `layer_types` for hybrids. `null` on gated repos → app uses a coarse params proxy. Computed by the generator. |
+| **Benchmarks** | curated (model cards / leaderboards) | Hand-maintained; preserved across syncs — the generator never overwrites them. **Recipes carry no eval data**, so these are indicative/unverified and the UI labels them so. |
 
 ### Keeping data correct
 - `node scripts/sync-data.mjs` — rebuilds `data.js` from recipes (context length, variant precisions, `recipe_id` casing), preserving curated fields.
