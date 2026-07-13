@@ -116,7 +116,7 @@ function filterModels() {
         if (searchQuery && !model.name.toLowerCase().includes(searchQuery) && !model.provider.toLowerCase().includes(searchQuery)) return false;
         return true;
     });
-    const sortBy = document.getElementById('sortSelect').value;
+    const sortBy = document.getElementById('sortSelect')?.value || 'params';
     filteredModels.sort((a, b) => {
         switch(sortBy) {
             case 'params': return b.totalParams - a.totalParams;
@@ -328,7 +328,7 @@ function openModal(id) {
     const kvTokens = getKVContextTokens();
     const kvGB = estKVCacheGB(model, kvTokens);
     const contextWarning = kvTokens
-        ? `<div class="text-xs text-[#f59e0b] mt-2">⚠️ KV-cache estimate at ${formatContextLength(kvTokens)} ctx ≈ <strong>+${kvGB.toFixed(1)} GB</strong> on top of weights (rough — ignores GQA/MLA).</div>`
+        ? `<div class="text-xs text-[#f59e0b] mt-2">⚠️ KV-cache estimate at ${formatContextLength(kvTokens)} ctx ≈ <strong>+${kvGB.toFixed(1)} GB</strong> on top of weights (rough — a params×tokens proxy that ignores GQA/MLA and over-estimates MoE models, whose KV tracks attention depth, not total params).</div>`
         : `<div class="text-xs text-[#f59e0b] mt-2">⚠️ VRAM shown is weights only. Enable the KV-cache estimate (top filter bar) to factor in context length.</div>`;
     
     const benchmarks = model.benchmark;
@@ -402,6 +402,7 @@ function openModal(id) {
         <div class="mb-8">
             <h3 class="font-semibold mb-4">Benchmark Performance</h3>
             <div class="space-y-4">${benchHTML}</div>
+            <p class="text-xs text-[#f59e0b] mt-3">⚠️ Indicative only — benchmarks are hand-curated from model cards/leaderboards, are <strong>not</strong> part of the vLLM recipe data, and are unverified for unreleased/preview models. Do not treat as authoritative.</p>
         </div>
 
         <div class="mb-8">
@@ -451,6 +452,7 @@ function syncStateToURL() {
         const el = document.getElementById(id);
         if (!el || el.value == null || el.value === '') continue;
         const isDefault = (id === 'sortSelect' && el.value === 'params')
+            || (id === 'gpuTypeSelect' && el.value === 'L4-24GB')
             || (['quantFilter', 'typeFilter'].includes(id) && el.value === 'all')
             || (['contextFilter', 'kvContextSelect'].includes(id) && el.value === '0');
         if (!isDefault) params.set(key, el.value);
@@ -480,93 +482,90 @@ filterModels();
 
 function openGPUInfoModal() {
     document.getElementById('modalProvider').textContent = '';
+
+    // Rendered live from GPU_CONFIG / GPU_QUANT_COMPAT (the same tables the fit
+    // logic uses) so this modal can never drift from the data. Add a format to
+    // FORMAT_ORDER + the maps and it shows up here automatically.
+    const FORMAT_ORDER = ['BF16', 'FP8', 'INT8', 'INT4', 'NVFP4', 'MXFP4', 'MXFP8'];
+    const FORMAT_LABEL = { INT4: 'INT4/AWQ/GPTQ' };
+    const FORMAT_NOTE = {
+        BF16: 'Universal baseline — every listed GPU runs FP16/BF16 on native tensor cores.',
+        FP8: 'Native on Ada (4th-gen) & Hopper+ via Transformer Engine; software (Marlin) on Ampere.',
+        INT8: 'W8A8 int8 GEMM on native int8 tensor cores — all listed GPUs are Ampere+ (sm_80+).',
+        INT4: 'INT4/AWQ/GPTQ (W4A16) weights are dequantised to FP16 for compute (Marlin) — software on all GPUs.',
+        NVFP4: 'Blackwell FP4 tensor cores only — vLLM recipes gate NVFP4 checkpoints to Blackwell. NVIDIA ModelOpt format.',
+        MXFP4: 'OCP MXFP4 format (e.g. gpt-oss). Native on Blackwell; software dequant elsewhere — recipes note it fits a single A100.',
+        MXFP8: 'OCP MXFP8 microscaling format. Native on Blackwell MX tensor cores (B200/B300); unsupported on earlier GPUs.',
+    };
+    // One representative GPU key per architecture column (H200 ≡ H100, B200 ≡ B100).
+    const COLUMNS = [
+        { label: 'L4', sub: 'Ada', gpu: 'L4-24GB' },
+        { label: 'A100', sub: 'Ampere', gpu: 'A100-80GB' },
+        { label: 'H100/H200', sub: 'Hopper', gpu: 'H100-80GB' },
+        { label: 'B100/B200', sub: 'Blackwell', gpu: 'B100-192GB' },
+    ];
+
+    const cell = (level) => {
+        if (level === 'native') return `<span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span>`;
+        if (level === 'sw') return `<span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span>`;
+        return `<span class="text-[#ef4444] text-lg">✗</span>`;
+    };
+    const chip = (fmt, kind) => {
+        const cls = kind === 'native'
+            ? 'bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]'
+            : 'bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]';
+        return `<span class="px-2 py-0.5 rounded text-xs ${cls}">${FORMAT_LABEL[fmt] || fmt}</span>`;
+    };
+
+    const snapshotCards = COLUMNS.map(col => {
+        const map = GPU_QUANT_COMPAT[col.gpu] || {};
+        const cfg = GPU_CONFIG[col.gpu] || {};
+        const list = (kind) => {
+            const fmts = FORMAT_ORDER.filter(f => map[f] === kind);
+            return fmts.length ? fmts.map(f => chip(f, kind)).join('') : '<span class="text-[10px] text-[#666680]">—</span>';
+        };
+        return `
+                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
+                        <div class="text-xs text-[#8888a0] mb-1">${cfg.architecture || ''}</div>
+                        <div class="font-bold mb-2">${col.label}</div>
+                        <div class="space-y-2">
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
+                                <div class="flex flex-wrap gap-1">${list('native')}</div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
+                                <div class="flex flex-wrap gap-1">${list('sw')}</div>
+                            </div>
+                        </div>
+                    </div>`;
+    }).join('');
+
+    const specRows = Object.values(GPU_CONFIG).map(cfg => `
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2 font-medium">${cfg.name}</td>
+                                <td class="py-3 px-2 text-[#8888a0]">${cfg.architecture} (${cfg.sm})</td>
+                                <td class="py-3 px-2 text-right">${cfg.vram} GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">${cfg.usableVram} GB</td>
+                                <td class="py-3 px-2 text-[#8888a0]">${cfg.memory}</td>
+                            </tr>`).join('');
+
+    const matrixRows = FORMAT_ORDER.map(fmt => {
+        const cells = COLUMNS.map(col =>
+            `<td class="py-3 px-2 text-center">${cell((GPU_QUANT_COMPAT[col.gpu] || {})[fmt])}</td>`).join('');
+        return `
+                            <tr class="border-b border-[#1a1a24]">
+                                <td class="py-3 px-2"><span class="badge ${getQuantBadgeClass(fmt)}">${FORMAT_LABEL[fmt] || fmt}</span></td>
+                                ${cells}
+                                <td class="py-3 px-2 text-[#8888a0] text-xs">${FORMAT_NOTE[fmt] || ''}</td>
+                            </tr>`;
+    }).join('');
+
     const gpuInfo = `
         <div class="space-y-8">
             <div>
                 <h3 class="text-xl font-bold mb-4 gradient-text">GPU Compatibility Snapshot</h3>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
-                        <div class="text-xs text-[#8888a0] mb-1">Ada Lovelace</div>
-                        <div class="font-bold mb-2">L4 24GB</div>
-                        <div class="space-y-2">
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
-                        <div class="text-xs text-[#8888a0] mb-1">Ampere</div>
-                        <div class="font-bold mb-2">A100 80GB</div>
-                        <div class="space-y-2">
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">FP8</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
-                        <div class="text-xs text-[#8888a0] mb-1">Hopper</div>
-                        <div class="font-bold mb-2">H100/H200</div>
-                        <div class="space-y-2">
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">MXFP4</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
-                        <div class="text-xs text-[#8888a0] mb-1">Blackwell</div>
-                        <div class="font-bold mb-2">B100/B200</div>
-                        <div class="space-y-2">
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">Native HW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">BF16</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">FP8</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">NVFP4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">MXFP4</span>
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#1a3a1a] text-[#4ade80] border border-[#2a5a2a]">MXFP8</span>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="text-[10px] text-[#8888a0] uppercase tracking-wide mb-1">vLLM SW</div>
-                                <div class="flex flex-wrap gap-1">
-                                    <span class="px-2 py-0.5 rounded text-xs bg-[#3a2a1a] text-[#fb923c] border border-[#5a3a1a]">INT4</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">${snapshotCards}
                 </div>
                 <div class="mt-3 flex gap-4 text-xs text-[#666680] justify-center">
                     <span><span class="text-[#4ade80]">●</span> Native hardware tensor core support</span>
@@ -587,49 +586,7 @@ function openGPUInfoModal() {
                                 <th class="text-left py-3 px-2">Memory</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2 font-medium">L4 24GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">Ada Lovelace (sm_89)</td>
-                                <td class="py-3 px-2 text-right">24 GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">22 GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">GDDR6</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2 font-medium">A100 80GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">Ampere (sm_80)</td>
-                                <td class="py-3 px-2 text-right">80 GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">76 GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">HBM2e</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2 font-medium">H100 80GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">Hopper (sm_90)</td>
-                                <td class="py-3 px-2 text-right">80 GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">76 GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">HBM3</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2 font-medium">H200 141GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">Hopper (sm_90)</td>
-                                <td class="py-3 px-2 text-right">141 GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">133 GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">HBM3e</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2 font-medium">B100 192GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">Blackwell (sm_100)</td>
-                                <td class="py-3 px-2 text-right">192 GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">182 GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">HBM3e</td>
-                            </tr>
-                            <tr>
-                                <td class="py-3 px-2 font-medium">B200 192GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">Blackwell (sm_100)</td>
-                                <td class="py-3 px-2 text-right">192 GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">182 GB</td>
-                                <td class="py-3 px-2 text-[#8888a0]">HBM3e</td>
-                            </tr>
+                        <tbody>${specRows}
                         </tbody>
                     </table>
                 </div>
@@ -642,62 +599,11 @@ function openGPUInfoModal() {
                         <thead>
                             <tr class="border-b border-[#2a2a3a]">
                                 <th class="text-left py-3 px-2">Format</th>
-                                <th class="text-center py-3 px-2">L4<br><span class="text-xs text-[#666680]">Ada</span></th>
-                                <th class="text-center py-3 px-2">A100<br><span class="text-xs text-[#666680]">Ampere</span></th>
-                                <th class="text-center py-3 px-2">H100/H200<br><span class="text-xs text-[#666680]">Hopper</span></th>
-                                <th class="text-center py-3 px-2">B100/B200<br><span class="text-xs text-[#666680]">Blackwell</span></th>
+                                ${COLUMNS.map(c => `<th class="text-center py-3 px-2">${c.label}<br><span class="text-xs text-[#666680]">${c.sub}</span></th>`).join('')}
                                 <th class="text-left py-3 px-2">Notes</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2"><span class="badge badge-bf16">BF16</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">Universal baseline - all GPUs support FP16/BF16 natively</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2"><span class="badge badge-fp8">FP8</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">Native on Ada (4th-gen) & Hopper+ via Transformer Engine. Marlin/llm-comp on Ampere</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2"><span class="badge badge-int4">INT4/AWQ/GPTQ</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">AWQ/GPTQ via Marlin kernel - software quantization on all GPUs</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2"><span class="badge badge-nvfp4">NVFP4</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">Blackwell FP4 tensor cores only — vLLM recipes gate NVFP4 checkpoints to Blackwell. NVIDIA ModelOpt format</td>
-                            </tr>
-                            <tr class="border-b border-[#1a1a24]">
-                                <td class="py-3 px-2"><span class="badge badge-mxfp4">MXFP4</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#f59e0b] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#fb923c]">vLLM SW</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">OCP MXFP4 format (e.g. gpt-oss). Native on Blackwell; software dequant elsewhere — recipes note it fits on a single A100</td>
-                            </tr>
-                            <tr>
-                                <td class="py-3 px-2"><span class="badge badge-mxfp8">MXFP8</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#ef4444] text-lg">✗</span></td>
-                                <td class="py-3 px-2 text-center"><span class="text-[#22c55e] font-bold text-lg">✓</span><br><span class="text-[10px] text-[#4ade80]">Native</span></td>
-                                <td class="py-3 px-2 text-[#8888a0] text-xs">OCP MXFP8 microscaling format. Native on Blackwell MX tensor cores (B200/B300); unsupported on earlier GPUs</td>
-                            </tr>
+                        <tbody>${matrixRows}
                         </tbody>
                     </table>
                 </div>
@@ -714,13 +620,13 @@ function openGPUInfoModal() {
                 <h3 class="text-xl font-bold mb-4 gradient-text">Reference Links</h3>
                 <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a]">
                     <div class="text-xs text-[#8888a0] space-y-2">
-                        <p>Quantization support data sourced from:</p>
+                        <p>Compatibility &amp; specs are rendered live from the app's GPU_CONFIG / GPU_QUANT_COMPAT tables. Sources:</p>
                         <ul class="list-disc list-inside space-y-1">
-                            <li><a href="https://docs.vllm.ai/en/stable/features/quantization/" target="_blank" class="text-[#818cf8] hover:underline">vLLM Quantization Documentation</a> — Official hardware compatibility matrix</li>
-                            <li><a href="https://docs.vllm.ai/en/v0.19.1/api/vllm/model_executor/layers/quantization/" target="_blank" class="text-[#818cf8] hover:underline">vLLM Quantization API Reference</a> — Per-method implementation details</li>
-                            <li><a href="https://www.nvidia.com/en-us/" target="_blank" class="text-[#818cf8] hover:underline">NVIDIA GPU Specifications</a> — Tensor core capabilities per architecture</li>
+                            <li><a href="https://docs.vllm.ai/en/latest/features/quantization/supported_hardware/" target="_blank" class="text-[#818cf8] hover:underline">vLLM Quantization — Supported Hardware</a> — official method × architecture matrix</li>
+                            <li><a href="https://recipes.vllm.ai" target="_blank" class="text-[#818cf8] hover:underline">vLLM Recipes</a> — per-model precision & hardware hints</li>
+                            <li><a href="https://www.nvidia.com/en-us/" target="_blank" class="text-[#818cf8] hover:underline">NVIDIA GPU Specifications</a> — tensor-core capabilities per architecture</li>
                         </ul>
-                        <p class="mt-2 text-[#f59e0b]">⚠️ This data reflects vLLM's current support matrix and may change. Check the links above for updates.</p>
+                        <p class="mt-2 text-[#f59e0b]">⚠️ vLLM's support matrix changes over time — check the links above for updates.</p>
                     </div>
                 </div>
             </div>

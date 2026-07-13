@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { normalizePrec, BYTES_PER_PARAM } from '../shared/prec.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -25,18 +26,8 @@ function loadModels() {
   return eval(m[1]); // trusted local source
 }
 
-// Canonical-format normalizer, mirrors normalizePrec() in index.html.
-function norm(p) {
-  p = (p || '').toUpperCase();
-  if (p.includes('NVFP4')) return 'NVFP4';
-  if (p.includes('MXFP4')) return 'MXFP4';
-  if (p.includes('MXFP8')) return 'MXFP8';
-  if (p === 'FP4+FP8' || (p.includes('FP4') && !p.includes('FP8'))) return 'NVFP4';
-  if (p.includes('FP8')) return 'FP8';
-  if (p === 'BF16') return 'BF16';
-  if (p.includes('INT4') || p.includes('AWQ') || p.includes('GPTQ') || p.includes('W4A16')) return 'INT4';
-  return p || null;
-}
+// Canonical-format normalizer is shared with app.js / sync-data.mjs (../shared/prec.mjs).
+const norm = normalizePrec;
 
 function parseB(s) {
   if (s == null) return null;
@@ -61,7 +52,7 @@ async function main() {
   const inventory = await fetchJson(`${BASE}/models.json`);
   const byId = new Map(inventory.map(r => [r.hf_id.toLowerCase(), r]));
 
-  const report = { notInInventory: [], context: [], params: [], variants: [] };
+  const report = { notInInventory: [], context: [], params: [], variants: [], vram: [] };
 
   // limited-concurrency fetch of each model's recipe
   const queue = [...app];
@@ -90,6 +81,25 @@ async function main() {
         report.variants.push({ id: m.id, name: m.name, missingInApp: missing,
           recipe: [...recipePrecs].filter(Boolean), app: [...appPrecs].filter(Boolean) });
       }
+
+      // Weight-only VRAM invariant: for uniformly-quantised "pure" precisions the
+      // value MUST equal totalParams x bytes-per-param (no serving headroom, no
+      // KV cache — those are separate). Mixed/compound precisions (MXFP4 / "FP4+FP8"
+      // / "AMD-FP8") legitimately deviate from the naive formula and are skipped.
+      const pureFormula = (prec) => {
+        const raw = (prec || '').toUpperCase();
+        const c = norm(prec);
+        if (!['BF16', 'FP8', 'INT8', 'INT4', 'NVFP4'].includes(c)) return null;
+        if (raw.includes('+') || raw.includes('AMD') || raw.includes('MX')) return null;
+        return Math.max(1, Math.round(m.totalParams * BYTES_PER_PARAM[c]));
+      };
+      for (const part of [{ prec: m.prec, vram: m.vram }, ...(m.variants || [])]) {
+        if (part.vram == null) continue;
+        const f = pureFormula(part.prec);
+        if (f != null && Math.abs(part.vram - f) > Math.max(1, f * 0.05)) {
+          report.vram.push({ id: m.id, name: `${m.name} [${part.prec}]`, app: part.vram, formula: f });
+        }
+      }
     }
   }
   await Promise.all(Array.from({ length: 8 }, worker));
@@ -107,7 +117,10 @@ async function main() {
   line(`\nVariant precisions present in recipe but missing in app: ${report.variants.length}`);
   report.variants.forEach(x => line(`  - id ${x.id} ${x.name}: missing [${x.missingInApp.join(', ')}]  (recipe {${x.recipe.join(',')}})`));
 
-  const total = report.notInInventory.length + report.context.length + report.params.length + report.variants.length;
+  line(`\nPure-precision weight-only VRAM ≠ formula: ${report.vram.length}`);
+  report.vram.forEach(x => line(`  - id ${x.id} ${x.name}: app=${x.app}GB formula=${x.formula}GB`));
+
+  const total = report.notInInventory.length + report.context.length + report.params.length + report.variants.length + report.vram.length;
   line(`\nTotal discrepancies: ${total}`);
   process.exitCode = total > 0 ? 1 : 0;
 }

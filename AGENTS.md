@@ -38,7 +38,8 @@ Static, no-build web application that helps users select vLLM-compatible LLM mod
 - MXFP4 → native on Blackwell, **software elsewhere incl. A100** (gpt-oss-120b: "fits on 1xA100 80GB").
 - MXFP8 → **native on Blackwell MX tensor cores only** (MiniMax-M3: "Blackwell ... for native MX tensor core").
 - FP8 → native on Ada/Hopper/Blackwell, **software (Marlin) on Ampere**.
-- INT8/INT4/AWQ/GPTQ → software on all listed GPUs.
+- INT8 (W8A8) → **native on all listed GPUs** (all are Ampere+/sm_80+ with int8 tensor cores; vLLM's CUTLASS int8 GEMM is the native path).
+- INT4/AWQ/GPTQ (W4A16) → **software on all** (weights dequantised to FP16 for compute via Marlin — no int4 tensor-core math).
 
 **Where these live & how to update:**
 - `GPU_CONFIG` and `GPU_QUANT_COMPAT` are **hand-maintained inside `scripts/sync-data.mjs`** (no recipe carries them). Edit them there *with a source citation in the comment*, then run the generator.

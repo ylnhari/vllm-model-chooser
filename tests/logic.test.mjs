@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadApp } from './harness.mjs';
+import { normalizePrec as sharedNormalizePrec } from '../shared/prec.mjs';
 
 const app = loadApp();
 const { normalizePrec, isPrecCompatible, precSupportLevel, getGPUVRAM, estKVCacheGB,
@@ -36,6 +37,19 @@ test('normalizePrec: unknown / empty returns null', () => {
   assert.equal(normalizePrec(''), null);
   assert.equal(normalizePrec(null), null);
   assert.equal(normalizePrec(undefined), null);
+});
+
+// Drift guard: app.js keeps its own copy of normalizePrec (it runs as a classic
+// browser <script>, no ESM import), while the Node scripts import ../shared/prec.mjs.
+// This asserts the two never diverge — the exact failure that made factcheck's old
+// private copy mis-handle INT8/W8A8 and unknown formats.
+test('normalizePrec: app.js copy matches the shared ../shared/prec.mjs module', () => {
+  const inputs = ['BF16', 'FP8', 'AMD-FP8', 'FP4+FP8', 'NVFP4', 'NVFP4-QAD', 'MXFP4',
+    'MXFP8', 'INT8', 'W8A8', 'INT8-W8A8', 'INT4', 'AWQ', 'GPTQ', 'GPTQ-Int4', 'W4A16',
+    'QAT-W4A16', 'QAT-mobile', '300B-A47B', 'INT2/4/8', 'fp8', '', null, undefined];
+  for (const p of inputs) {
+    assert.equal(normalizePrec(p), sharedNormalizePrec(p), `mismatch on ${JSON.stringify(p)}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -130,17 +144,17 @@ test('modelFitsGPU: tiny model fits a single L4; huge model does not', () => {
 });
 
 test('modelFitsGPU: the quant gate blocks a Blackwell-only NVFP4 variant on Hopper', () => {
-  // DeepSeek-V3 (id 120): base FP8 805GB, NVFP4 variant 403GB (Blackwell only).
+  // DeepSeek-V3 (id 120): base FP8 671GB (weight-only), NVFP4 variant 336GB (Blackwell only).
   const m = MODELS_DATA.find(x => x.id === 120);
   app.setGpuType('H100-80GB');
-  // 8x H100 = 608GB: base FP8 (805) doesn't fit; NVFP4 (403) fits VRAM but is
+  // 8x H100 = 608GB: base FP8 (671) doesn't fit; NVFP4 (336) fits VRAM but is
   // unsupported on Hopper, so the model is blocked by the quant gate.
   const blocked = modelFitsGPU(m, 8);
   assert.equal(blocked.fits, false);
   assert.equal(blocked.reason, 'quant');
-  // 4x B200 = 728GB: base 805 no, NVFP4 403 fits VRAM AND is native → variant selected.
+  // 3x B200 = 546GB: base FP8 671 doesn't fit, NVFP4 336 fits VRAM AND is native → variant selected.
   app.setGpuType('B200-192GB');
-  const r = modelFitsGPU(m, 4);
+  const r = modelFitsGPU(m, 3);
   assert.equal(r.fits, true);
   assert.equal(r.variant.prec, 'NVFP4');
   assert.equal(r.level, 'native');

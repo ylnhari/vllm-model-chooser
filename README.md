@@ -65,7 +65,8 @@ Tri-state: **Native** = hardware tensor cores · **vLLM SW** = software path (lo
 |--------|----------|---------------|--------------------|---------------------|
 | BF16 | Native ✓ | Native ✓ | Native ✓ | Native ✓ |
 | FP8 | Native ✓ | vLLM SW ✓ | Native ✓ | Native ✓ |
-| INT8/INT4/AWQ/GPTQ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ |
+| INT8 (W8A8) | Native ✓ | Native ✓ | Native ✓ | Native ✓ |
+| INT4/AWQ/GPTQ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ |
 | NVFP4 | ✗ | ✗ | ✗ | Native ✓ |
 | MXFP4 | vLLM SW ✓ | vLLM SW ✓ | vLLM SW ✓ | Native ✓ |
 | MXFP8 | ✗ | ✗ | ✗ | Native ✓ |
