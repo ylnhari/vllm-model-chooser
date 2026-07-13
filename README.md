@@ -105,7 +105,17 @@ KV(tokens) = kvBytesPerToken × tokens
            + kvSlidingBytesPerToken × min(tokens, kvWindow)
 ```
 
-Sliding-window layers **cannot** be folded into a single bytes-per-token constant: their cache is capped at the window no matter how long the context grows. Gemma-3/4, Step-3.7, Voxtral and others are mostly sliding layers — counting every layer as full attention overstates `gemma-4-31B` at 128K as **128.8 GB when the real figure is 22.3 GB (5.8×)**, wrongly excluding it from GPUs it fits.
+Sliding-window layers **cannot** be folded into a single bytes-per-token constant: their cache is capped at the window no matter how long the context grows. Gemma-3/4 and Step-3.7 are mostly sliding layers — counting every layer as full attention overstates `gemma-4-31B` at 128K as **128.8 GB when the real figure is 22.3 GB (5.8×)**, wrongly excluding it from GPUs it fits.
+
+But the inverse trap is worse. **A declared `sliding_window` does not mean the cache is capped**, and reading it naively *under*-counts — which makes a model claim to fit on GPUs it doesn't:
+
+- **Qwen2/2.5** declare `sliding_window` but disable it via `use_sliding_window: false` → plain full attention.
+- **DeepSeek-V4** pairs it with **sparse attention** (`index_topk`): sparsity changes which tokens you *attend to*, not which you *store*. The full MLA cache is kept. Reading the window as a cap reported **0.016 GB of KV for a 284B model at 1M context** — the real figure is ~52 GB.
+- **MiMo-V2** uses `hybrid_layer_pattern` (`0` = full, `1` = SWA with separate `swa_*` head geometry).
+
+A test now fails on any model whose KV comes out implausibly small for its own advertised context.
+
+**When is 0 GB legitimate?** Only for models that never autoregressively decode — diffusion pipelines (image/video/audio) denoise a whole latent iteratively, so there are no previous tokens to cache. Embedding/rerankers are **not** zero: vLLM still fills a transient KV cache during prefill.
 
 Geometry is read from each model's HF `config.json` by the generator. `kvSource` records provenance, and the UI marks anything that isn't a first-hand read:
 

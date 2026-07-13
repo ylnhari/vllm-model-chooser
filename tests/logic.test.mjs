@@ -254,6 +254,63 @@ test('estKVCacheGB: sliding-window KV is capped at the window, not the context',
   assert.ok(estKVCacheGB(m, 131072) < naive, 'sliding KV must be below the full-attention upper bound');
 });
 
+// Qwen2/Qwen2.5 configs DECLARE sliding_window but disable it via use_sliding_window:false.
+// Honouring the window anyway capped Qwen2.5-VL-7B's KV at 32K while its real context is
+// 128K — a 4x UNDER-count, which makes a model claim to fit on GPUs it doesn't. The
+// generator now gates on the flag; this asserts those models are treated as full attention.
+test('data: models that disable sliding-window (use_sliding_window:false) are full attention', () => {
+  for (const name of ['Qwen2.5-VL-7B-Instruct', 'Qwen2.5-32B']) {
+    const m = MODELS_DATA.find(x => x.name === name);
+    assert.ok(m, `${name} missing from dataset`);
+    assert.ok(m.kvBytesPerToken > 0, `${name} must have full-attention KV, not a disabled window`);
+    assert.ok(!m.kvSlidingBytesPerToken, `${name} must not carry sliding KV — its window is disabled`);
+  }
+});
+
+// Guard the harmful direction generally: a model must never cap its KV below its own
+// advertised context unless it genuinely has sliding layers with a smaller window.
+test('data: no model silently caps KV below its context without sliding layers', () => {
+  for (const m of MODELS_DATA) {
+    if (m.kvSource === 'none' || m.kvBytesPerToken == null) continue;
+    if (m.kvWindow && !m.kvSlidingBytesPerToken) {
+      assert.fail(`${m.name} declares a KV window but no sliding layers to apply it to`);
+    }
+  }
+});
+
+// THE SMELL TEST. A KV-bearing model advertising a 1M context cannot need ~0 GB of KV to
+// serve it. This exact absurdity shipped: DeepSeek-V4's config declares `sliding_window:128`
+// alongside SPARSE attention (index_topk) — but sparse attention changes which tokens you
+// ATTEND TO, not which you STORE, so the full cache is still kept. Reading that window as a
+// cache cap reported 0.016 GB of KV for a 284B model at 1M context. Any future architecture
+// that trips this assertion is being mis-parsed in the dangerous (under-counting) direction.
+test('data: KV-bearing models need a non-trivial cache at their own advertised context', () => {
+  const MIN_GB_PER_100K = 0.05;   // absurdly generous floor; real models are 1-3 orders above
+  for (const m of MODELS_DATA) {
+    if (m.kvSource === 'none' || !m.contextLength) continue;
+    const ctx = Math.min(m.contextLength, 131072);
+    const gb = estKVCacheGB(m, ctx);
+    assert.ok(
+      gb >= MIN_GB_PER_100K * (ctx / 100000),
+      `${m.name} claims only ${gb.toFixed(4)} GB of KV at ${ctx} tokens — implausible; ` +
+      `its config is almost certainly being mis-parsed (a declared sliding_window that ` +
+      `does not actually cap the cache?).`
+    );
+  }
+});
+
+// MLA must not be scored with the GQA formula (it over-counts ~20x) and must not be missed
+// (DeepSeek-V4 spells its latent as num_key_value_heads:1 + head_dim + qk_rope_head_dim
+// rather than V3's kv_lora_rank). Both DeepSeek generations should land in a sane band.
+test('data: MLA models have a compact per-token cache, not a GQA-sized one', () => {
+  for (const name of ['DeepSeek-V4-Flash', 'DeepSeek-V4-Pro']) {
+    const m = MODELS_DATA.find(x => x.name === name);
+    if (!m) continue;
+    const at1m = estKVCacheGB(m, 1048576);
+    assert.ok(at1m > 10 && at1m < 200, `${name} KV@1M = ${at1m.toFixed(1)}GB, outside the sane MLA band`);
+  }
+});
+
 test('estKVCacheGB: FP8 KV cache (--kv-cache-dtype fp8) halves the footprint', () => {
   const m = MODELS_DATA.find(x => x.kvBytesPerToken > 0);
   app.setKVDtype('fp16');

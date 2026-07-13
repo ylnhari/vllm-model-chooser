@@ -153,7 +153,30 @@ Fallback chain (`fetchConfigKV`), which also sets `kvSource`:
    (→ `'none'`); `{ layers, kvHeads, headDim }` for the rare gated model with no mirror
    (→ `'estimate'`, `†` — cite the source, as `plamo-3` does).
 
-The two halves of the computation, keyed off config fields:
+#### A declared `sliding_window` does NOT mean the cache is capped
+
+This is the trap. The field means different things in different architectures, and reading it
+naively under-counts — the direction that makes a model claim to fit on GPUs it doesn't.
+Three real cases, all of which shipped as bugs:
+
+| Config says | Reality | Gate |
+|---|---|---|
+| `sliding_window` + `use_sliding_window: false` (Qwen2/2.5) | window is **disabled**; plain full attention | check the flag |
+| `sliding_window` + `index_topk`/`index_n_heads` (DeepSeek DSA) | **sparse attention**: changes which tokens you *attend to*, not which you *store*. Full cache is kept so the indexer can select from it | `isSparseAttention()` |
+| `sliding_window` + `hybrid_layer_pattern` (MiMo-V2) | `0` = full-attention layers, `1` = SWA layers with their own `swa_*` head geometry | parse the pattern |
+
+Reading `sliding_window: 128` as a cap reported **0.016 GB of KV for a 284B DeepSeek-V4 at a
+1M context**. The real figure is ~52 GB. A test (`KV-bearing models need a non-trivial cache
+at their own advertised context`) now fails on any model that trips this.
+
+#### When 0 GB of KV is legitimate
+Only for models that never autoregressively decode. Diffusion pipelines (image/video/audio:
+`model_index.json` → a `*Pipeline`, not a `*ForCausalLM`) denoise a whole latent iteratively —
+there are no previous tokens to cache. These are `kvSource: 'none'`. **Embedding/reranker
+models are NOT zero**: vLLM still fills a KV cache during the prefill forward pass; it's just
+transient (freed after pooling, no decode loop).
+
+#### The two halves of the computation, keyed off config fields:
 - **per-layer bytes** (`perLayerKVBytes`): MLA (`kv_lora_rank + qk_rope_head_dim` — a single
   compressed latent, **not** ×heads, **not** ×2 — DeepSeek); else GQA/MHA
   (`2 × num_key_value_heads × head_dim × 2B`). `head_dim` falls back to `attention_head_dim`

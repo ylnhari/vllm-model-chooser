@@ -417,7 +417,8 @@ function kvMark(model) {
 // card, or the number reads as broken (DeepSeek-V4-Flash: a 284B model with ~0GB KV).
 function kvNote(model) {
     if (hasNoKVCache(model)) return `<span class="text-[#666680]">· no KV cache (single-pass)</span>`;
-    if (model.kvWindow && model.kvSlidingBytesPerToken) {
+    // Only flag a window that actually caps within this model's context.
+    if (model.kvSlidingBytesPerToken && model.kvWindow > 0 && model.kvWindow < (model.contextLength || Infinity)) {
         return `<span class="text-[#666680]" title="Sliding-window attention: most layers cap their KV at a ${formatContextLength(model.kvWindow)}-token window instead of growing with the full context, so this model's KV stays far smaller than a full-attention model of the same size.">· SWA ${formatContextLength(model.kvWindow)}</span>`;
     }
     return '';
@@ -462,8 +463,31 @@ function openModal(id) {
         ? `° geometry from an ungated same-architecture mirror repo (the original is gated)`
         : `${dtypeLabel} KV from the model's own HuggingFace config.json attention geometry`;
 
-    const swa = model.kvWindow && model.kvSlidingBytesPerToken
-        ? `<div class="text-xs text-[#8888a0] mt-2">This model uses <strong>sliding-window attention</strong>: only some layers cache the full context, the rest are capped at a ${formatContextLength(model.kvWindow)}-token window. Its KV therefore grows far more slowly than a full-attention model of the same size.</div>`
+    // Sliding-window explainer. The all-sliding case (zero full-attention layers) gets a
+    // stronger caveat: KV goes ~constant regardless of context, which is a big claim, and
+    // if the model ALSO runs a global/sparse attention path that config.json doesn't
+    // express, we'd be UNDER-counting — the direction that makes a model claim to fit when
+    // it won't. Rule is data-driven (full === 0), not a per-model hardcode.
+    // A window wider than the model's own context never actually caps anything (Phi-4-mini:
+    // 256K window, 128K context) — warning about it would be noise.
+    const windowBites = model.kvWindow > 0 && model.kvWindow < (model.contextLength || Infinity);
+    const allSliding = model.kvBytesPerToken === 0 && model.kvSlidingBytesPerToken > 0 && windowBites;
+    const swa = windowBites && model.kvSlidingBytesPerToken
+        ? `<div class="text-xs text-[#8888a0] mt-2">
+             This model uses <strong>sliding-window attention</strong>: ${allSliding
+                ? `its config declares <strong>every</strong> layer as sliding, capped at a ${formatContextLength(model.kvWindow)}-token window`
+                : `only some layers cache the full context, the rest are capped at a ${formatContextLength(model.kvWindow)}-token window`}.
+             Its KV therefore grows far more slowly than a full-attention model of the same size.
+           </div>
+           ${allSliding ? `<div class="text-xs text-[#f59e0b] mt-2">
+             ⚠️ <strong>Verify this one before sizing hardware.</strong> With no full-attention layers, the KV
+             estimate stays nearly flat as context grows. That is what
+             <a href="https://huggingface.co/${model.hf_url}/blob/main/config.json" target="_blank" class="text-[#818cf8] hover:underline">this model's <code>config.json</code></a>
+             declares, and it is what vLLM reads — but if the model also runs a global or sparse attention path
+             that the config doesn't express, real KV would be <em>higher</em> than shown here. Cross-check the
+             <a href="https://huggingface.co/${model.hf_url}" target="_blank" class="text-[#818cf8] hover:underline">model card</a>
+             and <a href="https://recipes.vllm.ai/${model.recipe_id || model.hf_url}" target="_blank" class="text-[#818cf8] hover:underline">vLLM recipe</a> before committing to a GPU count.
+           </div>` : ''}`
         : '';
 
     const contextWarning = kvTokens

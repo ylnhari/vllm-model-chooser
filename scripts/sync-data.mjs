@@ -106,6 +106,7 @@ function emit(models) {
     if (m.kvBytesPerToken != null) fields.push(`kvBytesPerToken: ${m.kvBytesPerToken}`);
     if (m.kvSlidingBytesPerToken) fields.push(`kvSlidingBytesPerToken: ${m.kvSlidingBytesPerToken}`);
     if (m.kvWindow) fields.push(`kvWindow: ${m.kvWindow}`);
+    if (m.kvUpperBound) fields.push(`kvUpperBound: true`);
     if (m.kvSource) fields.push(`kvSource: ${JSON.stringify(m.kvSource)}`);
     // recipe_id is set only when the recipe path casing differs from hf_url
     // (e.g. HuggingFace "google/..." vs recipe "Google/..."); the recipe link
@@ -192,21 +193,39 @@ function descendToAttn(cfg) {
   return c;
 }
 
-// Per-layer KV bytes per token for one attention layer (FP16).
-function perLayerKVBytes(c) {
-  // MLA (DeepSeek): a single compressed latent (kv_lora_rank) + rope key per token per
-  // layer — NOT num_heads × head_dim, NOT doubled for K/V. GQA formula overcounts ~20×.
-  if (c.kv_lora_rank) return (c.kv_lora_rank + (c.qk_rope_head_dim || 0)) * 2;
-  const nHeads = c.num_attention_heads ?? c.n_heads;
-  const kvHeads = c.num_key_value_heads ?? c.n_kv_heads ?? nHeads;
-  let headDim = c.head_dim ?? c.attention_head_dim;
-  if (!headDim && (c.hidden_size || c.dim) && nHeads) headDim = (c.hidden_size || c.dim) / nHeads;
-  if (!kvHeads || !headDim) return null;
-  return 2 * kvHeads * headDim * 2;   // K + V, FP16
+// GQA/MHA per-layer KV bytes per token (K + V, FP16), optionally for the model's
+// separate sliding-window head geometry (`swa_*`, e.g. MiMo-V2).
+function gqaBytes(c, swa = false) {
+  const p = swa ? 'swa_' : '';
+  const nHeads = c[`${p}num_attention_heads`] ?? c.num_attention_heads ?? c.n_heads;
+  const kvHeads = c[`${p}num_key_value_heads`] ?? (swa ? null : (c.num_key_value_heads ?? c.n_kv_heads ?? nHeads));
+  let kDim = c[`${p}head_dim`] ?? (swa ? null : (c.head_dim ?? c.attention_head_dim));
+  if (!swa && !kDim && (c.hidden_size || c.dim) && nHeads) kDim = (c.hidden_size || c.dim) / nHeads;
+  if (!kvHeads || !kDim) return null;
+  const vDim = c[`${p}v_head_dim`] ?? c.v_head_dim ?? kDim;   // K and V dims can differ
+  return (kvHeads * kDim + kvHeads * vDim) * 2;              // FP16
 }
 
-// Split the model's layers into { full, sliding } KV-bearing counts. Layers that
-// hold no KV at all (Mamba/linear-attention blocks) are excluded from both.
+// MLA (DeepSeek): the cache is ONE compressed latent + a rope key per token per layer —
+// not heads x head_dim, and not doubled for K/V. V3 spells the latent as `kv_lora_rank`;
+// V4 expresses the same shape as num_key_value_heads:1 + head_dim:512 + qk_rope_head_dim.
+function mlaBytes(c) {
+  const latent = c.kv_lora_rank ?? ((c.num_key_value_heads === 1 && c.qk_rope_head_dim) ? c.head_dim : null);
+  if (!latent) return null;
+  return (latent + (c.qk_rope_head_dim || 0)) * 2;
+}
+
+// Does this config use SPARSE attention (DeepSeek DSA "lightning indexer", index_topk)?
+// Critical distinction: sparse attention changes which tokens you ATTEND TO, not which
+// you STORE — the full KV cache is still kept so the indexer has something to select
+// from. Such configs may also carry a `sliding_window`, but it does NOT cap the cache.
+// Treating it as a cap made DeepSeek-V4 report ~0 GB of KV at a 1M context.
+function isSparseAttention(c) {
+  return c.index_topk != null || c.index_n_heads != null;
+}
+
+// Split layers into KV-bearing { full, sliding } counts, or null if we don't confidently
+// recognise the scheme. Layers holding no KV (Mamba/linear blocks) are excluded from both.
 function classifyLayers(c) {
   // Mamba/attention hybrids: only the '*' (attention) entries cache KV.
   if (typeof c.hybrid_override_pattern === 'string') {
@@ -217,6 +236,12 @@ function classifyLayers(c) {
     const attn = c.layers_block_type.filter(t => String(t).toLowerCase().includes('attention')).length;
     if (attn > 0) return { full: attn, sliding: 0 };
   }
+  // MiMo-V2 style: 0 = full attention, 1 = sliding-window (with its own swa_* geometry).
+  if (Array.isArray(c.hybrid_layer_pattern)) {
+    const sliding = c.hybrid_layer_pattern.filter(x => Number(x) === 1).length;
+    const full = c.hybrid_layer_pattern.filter(x => Number(x) === 0).length;
+    if (full + sliding > 0) return { full, sliding, swaGeom: true };
+  }
   // Explicit per-layer types (Gemma-3 newer configs, Qwen3-Next, …).
   if (Array.isArray(c.layer_types)) {
     const full = c.layer_types.filter(t => String(t).includes('full')).length;
@@ -225,35 +250,56 @@ function classifyLayers(c) {
   }
   const layers = c.num_hidden_layers ?? c.n_layers;
   if (!layers) return null;
-  // Gemma-3 style: no layer_types, but sliding_window + a pattern saying every Nth
-  // layer is global attention and the rest are sliding.
-  const window = c.sliding_window;
-  if (window) {
+
+  // A declared `sliding_window` only caps the cache if it is actually IN EFFECT:
+  //  - Qwen2/Qwen2.5 declare it but gate it behind `use_sliding_window: false` — the window
+  //    is disabled and the model is plain full attention. Honouring it capped Qwen2.5-VL-7B
+  //    at its 32K window against a real 128K context: a 4x UNDER-count.
+  //  - Sparse-attention models (DeepSeek DSA) keep the full cache regardless (see above).
+  const windowActive = c.use_sliding_window !== false && !isSparseAttention(c) && c.sliding_window;
+  if (windowActive) {
     const pattern = c.sliding_window_pattern;
-    if (pattern && pattern > 1) {
+    if (pattern && pattern > 1) {                    // Gemma-3: every Nth layer is global
       const full = Math.floor(layers / pattern);
       return { full, sliding: layers - full };
     }
-    return { full: 0, sliding: layers };        // every layer slides
+    return { full: 0, sliding: layers };             // pure SWA (Mistral/Voxtral family)
   }
   return { full: layers, sliding: 0 };
 }
 
+// Returns { full, sliding, window, upperBound } in BYTES PER TOKEN (FP16 KV), or null.
+//   KV(tokens) = full * tokens + sliding * min(tokens, window)
+// `upperBound` marks a deliberately CONSERVATIVE result: we could not model the
+// architecture's cache exactly, so every layer is counted as full attention. Over-counting
+// merely hides a usable model; UNDER-counting makes a model claim to fit on GPUs it does
+// not — always fail toward the upper bound.
 function kvBytesPerTokenFromConfig(rawCfg) {
   const c = descendToAttn(rawCfg);
   if (!c) return null;
-  const perLayer = perLayerKVBytes(c);
-  if (perLayer == null) return null;
+
   const split = classifyLayers(c);
   if (!split || (split.full + split.sliding) === 0) return null;
-  const window = split.sliding > 0 ? (c.sliding_window || 0) : 0;
-  // A sliding split with no declared window would be unbounded — treat those layers
-  // as full attention rather than silently under-counting them.
-  if (split.sliding > 0 && !window) return { full: Math.round((split.full + split.sliding) * perLayer), sliding: 0, window: 0 };
+
+  const mla = mlaBytes(c);
+  const fullPerLayer = mla ?? gqaBytes(c);
+  if (fullPerLayer == null) return null;
+
+  // Sliding layers may carry their own head geometry (MiMo swa_*); fall back to the
+  // full-attention geometry when they don't.
+  const slidingPerLayer = (split.swaGeom ? gqaBytes(c, true) : null) ?? fullPerLayer;
+
+  const window = c.sliding_window || 0;
+  // Sliding layers with no window to cap them are unbounded — count them as full
+  // attention rather than silently under-counting.
+  if (split.sliding > 0 && !window) {
+    return { full: Math.round(split.full * fullPerLayer + split.sliding * slidingPerLayer), sliding: 0, window: 0, upperBound: true };
+  }
   return {
-    full: Math.round(split.full * perLayer),
-    sliding: Math.round(split.sliding * perLayer),
-    window,
+    full: Math.round(split.full * fullPerLayer),
+    sliding: Math.round(split.sliding * slidingPerLayer),
+    window: split.sliding > 0 ? window : 0,
+    upperBound: false,
   };
 }
 
@@ -315,9 +361,9 @@ async function fetchConfigKV(hfUrl) {
 
   if (hfUrl in KV_GEOMETRY_OVERRIDES) {
     const o = KV_GEOMETRY_OVERRIDES[hfUrl];
-    if (o === 0) return { kv: { full: 0, sliding: 0, window: 0 }, kvSource: 'none' };
+    if (o === 0) return { kv: { full: 0, sliding: 0, window: 0, upperBound: false }, kvSource: 'none' };
     return {
-      kv: { full: Math.round(o.layers * 2 * o.kvHeads * o.headDim * 2), sliding: 0, window: 0 },
+      kv: { full: Math.round(o.layers * 2 * o.kvHeads * o.headDim * 2), sliding: 0, window: 0, upperBound: false },
       kvSource: 'estimate',
     };
   }
@@ -348,13 +394,14 @@ async function main() {
         // Normalise both sides: the emitter omits zero-valued kvSliding/kvWindow, so a
         // round-tripped model reads them back as `undefined`. Comparing raw would report
         // a change on every re-sync and make the generator look non-idempotent.
-        const sig = (full, sliding, win, src) => `${full ?? 'x'}/${sliding || 0}/${win || 0}/${src || 'x'}`;
-        const before = sig(m.kvBytesPerToken, m.kvSlidingBytesPerToken, m.kvWindow, m.kvSource);
+        const sig = (mm) => `${mm.kvBytesPerToken ?? 'x'}/${mm.kvSlidingBytesPerToken || 0}/${mm.kvWindow || 0}/${mm.kvUpperBound || false}/${mm.kvSource || 'x'}`;
+        const before = sig(m);
         m.kvBytesPerToken = got.kv.full;
         m.kvSlidingBytesPerToken = got.kv.sliding || 0;
         m.kvWindow = got.kv.window || 0;
+        m.kvUpperBound = got.kv.upperBound || false;
         m.kvSource = got.kvSource;
-        const after = sig(m.kvBytesPerToken, m.kvSlidingBytesPerToken, m.kvWindow, m.kvSource);
+        const after = sig(m);
         if (before !== after) changes.kv.push({ name: m.name, to: after, src: got.kvSource });
       }
 
