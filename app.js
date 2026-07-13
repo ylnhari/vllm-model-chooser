@@ -34,27 +34,97 @@ function isPrecCompatible(prec, gpuType) {
     return precSupportLevel(prec, gpuType) !== null;
 }
 
-// Single source of truth for GPU VRAM calculation — must exist EXACTLY once
-function getGPUVRAM(gpus) {
-    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
-    return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);
+// --- Memory budget model ----------------------------------------------------
+// Mirrors how vLLM actually accounts for GPU memory (--gpu-memory-utilization):
+//
+//     budget   = physical VRAM × util          ← vLLM's hard ceiling
+//     kv pool  = budget − weights − activation/CUDA-graph reserve
+//
+// vLLM allocates the KV cache GREEDILY into whatever is left inside the budget after
+// weights and activations. So weights + KV must fit under (budget − reserve).
+// Docs: https://docs.vllm.ai/en/latest/configuration/engine_args.html
+const DEFAULT_MEM_UTIL = 0.95;
+const DEFAULT_RESERVE_GB = 2;      // per GPU — an ASSUMPTION, see getReserveGB()
+
+function numFromSelect(id, fallback) {
+    const raw = document.getElementById(id)?.value;
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : fallback;
 }
 
-// KV-cache estimate (GB), FP16 KV. When the model carries `kvBytesPerToken` (exact
-// attention geometry synced from its HuggingFace config.json — full-attention layers
-// × KV-heads × head-dim, counting only KV-bearing layers for hybrid/linear models),
-// this is accurate. Otherwise it falls back to a coarse params×tokens proxy for
-// models whose geometry couldn't be fetched (gated repos). Returns 0 when disabled.
-const KV_GB_PER_PARAM_PER_TOKEN = 3.3e-6;   // GB per (B-params × token) — fallback proxy only
+// Fraction of each GPU vLLM may use. vLLM's own default is 0.90–0.92; this app
+// defaults to 0.95, which is more optimistic — hence it's a user control, not a
+// buried constant.
+function getMemUtil() { return numFromSelect('memUtilSelect', DEFAULT_MEM_UTIL); }
+
+// Per-GPU activation + CUDA-graph reserve. IMPORTANT: vLLM does not COMPUTE this —
+// it MEASURES it by profiling a real forward pass at startup, and it scales with
+// --max-num-batched-tokens and the model's hidden size. Any fixed number here is an
+// assumption, which is exactly why it is a visible, user-adjustable control rather
+// than a hidden fudge factor.
+function getReserveGB() { return numFromSelect('reserveSelect', DEFAULT_RESERVE_GB); }
+
+function getGPUConfig() {
+    return GPU_CONFIG[document.getElementById('gpuTypeSelect')?.value || 'L4-24GB'] || {};
+}
+
+// Total vLLM memory budget across `gpus` GPUs (weights + KV + activations).
+function getGPUBudget(gpus) {
+    return gpus * (getGPUConfig().vram || 80) * getMemUtil();
+}
+
+// What weights + KV may actually occupy: the budget minus the activation reserve.
+// Single source of truth for the capacity check — must exist EXACTLY once.
+function getGPUVRAM(gpus) {
+    return Math.max(0, getGPUBudget(gpus) - gpus * getReserveGB());
+}
+
+// --- KV cache ----------------------------------------------------------------
+// KV(tokens) = full × tokens + sliding × min(tokens, window)
+//
+// Sliding-window layers CANNOT be folded into one bytes-per-token constant: their
+// cache is capped at `window` tokens however long the context grows. Gemma-3/4,
+// Step-3.7 and others are mostly sliding layers, so treating every layer as full
+// attention overestimates their long-context KV by several ×.
+// Geometry comes from each model's HF config.json (see scripts/sync-data.mjs);
+// `kvSource` records whether it was read from the real config, a same-architecture
+// mirror, or hand-estimated, so the UI can mark it.
+const KV_GB_PER_PARAM_PER_TOKEN = 3.3e-6;   // GB per (B-params × token) — proxy, only if geometry is missing
+const KV_DTYPE_BYTES = { fp16: 2, fp8: 1 };
+
+// vLLM's --kv-cache-dtype. Geometry is stored at FP16 (2 bytes/elem); fp8 halves it.
+function getKVDtype() { return document.getElementById('kvDtypeSelect')?.value || 'fp16'; }
+function kvDtypeScale() { return (KV_DTYPE_BYTES[getKVDtype()] || 2) / 2; }
+
 function estKVCacheGB(model, tokens) {
     if (!tokens) return 0;
-    // kvBytesPerToken present (incl. 0 for no-KV diffusion/generative models) → exact.
-    if (model.kvBytesPerToken != null) return model.kvBytesPerToken * tokens / 1e9;
-    return model.totalParams * tokens * KV_GB_PER_PARAM_PER_TOKEN;   // proxy fallback
+    const scale = kvDtypeScale();
+    if (model.kvBytesPerToken == null) {          // geometry unavailable → coarse proxy
+        return model.totalParams * tokens * KV_GB_PER_PARAM_PER_TOKEN * scale;
+    }
+    const full = model.kvBytesPerToken * tokens;
+    const win = model.kvWindow || 0;
+    const sliding = (model.kvSlidingBytesPerToken || 0) * (win ? Math.min(tokens, win) : 0);
+    return (full + sliding) * scale / 1e9;
 }
+
+// True when the model caches nothing per token (single-pass diffusion/generative).
+function hasNoKVCache(model) { return model.kvSource === 'none'; }
+
 // Selected context length (tokens) for the KV estimate; 0 = estimate off.
 function getKVContextTokens() {
     return parseInt(document.getElementById('kvContextSelect')?.value || '0') || 0;
+}
+
+// Worst-case concurrent requests: how many sequences, EACH filling the full context,
+// fit in the KV pool left after weights. Real serving does better (requests are
+// usually shorter than max context, and PagedAttention shares prefix blocks), so this
+// is a floor, not a prediction. null when there's no KV or no context selected.
+function maxConcurrentRequests(model, weightsGB, gpus, tokens) {
+    if (!tokens) return null;
+    const perReq = estKVCacheGB(model, tokens);
+    if (perReq <= 0) return null;
+    return Math.max(0, Math.floor((getGPUVRAM(gpus) - weightsGB) / perReq));
 }
 
 
@@ -66,25 +136,35 @@ let currentContextFilter = 0;
 let currentContextLength = 4096;
 
 // Dual check: BOTH VRAM capacity AND quantization format compatibility must pass.
-// When the KV estimate is enabled, the estimated KV cache is added to the weight
-// VRAM before the capacity check. Returns { fits, variant?, level?, reason? }.
+// weights + KV must fit under the usable budget (physical × util − activation reserve).
+// Returns the numbers the UI needs to *explain* the verdict, so the card's bar and its
+// ✓/✗ can never tell different stories:
+//   { fits, variant?, level?, reason?, weights, kv, usable }
+// `weights` is the precision actually selected on a fit, or the smallest candidate on a
+// miss (i.e. the model's best case — "even its smallest quantization overflows").
 function modelFitsGPU(model, gpus) {
     if (gpus === 0) return { fits: true, reason: "Any configuration" };
     const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
-    const vram = getGPUVRAM(gpus);
+    const usable = getGPUVRAM(gpus);
     const kv = estKVCacheGB(model, getKVContextTokens());
     let vramWouldFit = false;   // did any precision fit on VRAM but get blocked by the quant gate?
 
     const candidates = [{ prec: model.prec, vram: model.vram, base: true }, ...(model.variants || [])];
     for (const c of candidates) {
         if (!c.vram) continue;
-        const fitsVram = c.vram + kv <= vram;
-        if (!fitsVram) continue;
+        if (c.vram + kv > usable) continue;
         const level = precSupportLevel(c.prec || model.prec, gpuType);
         if (level === null) { vramWouldFit = true; continue; }   // blocked by quant gate
-        return c.base ? { fits: true, level } : { fits: true, variant: c, level };
+        const base = { fits: true, level, weights: c.vram, kv, usable };
+        return c.base ? base : { ...base, variant: c };
     }
-    return { fits: false, reason: vramWouldFit ? 'quant' : 'vram' };
+    const smallest = candidates.filter(c => c.vram).sort((a, b) => a.vram - b.vram)[0];
+    return {
+        fits: false,
+        reason: vramWouldFit ? 'quant' : 'vram',
+        weights: smallest ? smallest.vram : model.vram,
+        kv, usable,
+    };
 }
 
 function setGPUFilter(n) {
@@ -125,8 +205,6 @@ function filterModels() {
             case 'vram': return a.vram - b.vram;
             case 'contextLength': return (b.contextLength || 4096) - (a.contextLength || 4096);
             case 'name': return a.name.localeCompare(b.name);
-            case 'mmlu': return (b.benchmark.mmlu || 0) - (a.benchmark.mmlu || 0);
-            case 'humaneval': return (b.benchmark.humaneval || 0) - (a.benchmark.humaneval || 0);
             default: return 0;
         }
     });
@@ -142,6 +220,9 @@ function resetFilters() {
     setSelect('contextFilter', '0');
     setSelect('sortSelect', 'params');
     setSelect('kvContextSelect', '0');
+    setSelect('kvDtypeSelect', 'fp16');
+    setSelect('memUtilSelect', String(DEFAULT_MEM_UTIL));
+    setSelect('reserveSelect', String(DEFAULT_RESERVE_GB));
     const search = document.getElementById('searchInput');
     if (search) search.value = '';
     setGPUFilter(1);   // also re-runs filterModels()
@@ -167,9 +248,16 @@ function getQuantBadgeClass(prec) {
     return 'badge-bf16';
 }
 
+// GB formatter — the budget is now fractional (physical × util − reserve).
+function fmtGB(gb) {
+    if (gb == null) return '—';
+    return gb >= 100 ? Math.round(gb).toString() : gb.toFixed(1).replace(/\.0$/, '');
+}
+
+// Does the model fit on ANY supported GPU count? (1..8 — NOT just 1/2/4/8, which
+// used to mis-colour models that fit on exactly 3, 5, 6 or 7 GPUs.)
 function getVerdictClass(model) {
-    const gpus = [1, 2, 4, 8];
-    for (const gpu of gpus) {
+    for (let gpu = 1; gpu <= 8; gpu++) {
         if (modelFitsGPU(model, gpu).fits) return 'verdict-yes';
     }
     return 'verdict-no';
@@ -177,14 +265,15 @@ function getVerdictClass(model) {
 
 // Human-readable explanation for a fit result, used as a hover tooltip.
 function fitTooltip(result, gpus, gpuConfig) {
-    const where = `${gpus}× ${gpuConfig.name} (${getGPUVRAM(gpus)}GB usable)`;
+    const where = `${gpus}× ${gpuConfig.name} (${fmtGB(getGPUVRAM(gpus))}GB usable)`;
     if (result.fits) {
         const via = result.variant ? `${result.variant.prec} variant` : 'base precision';
         const sw = result.level === 'sw' ? ' — vLLM software path, loads but no speedup' : '';
-        return `Fits on ${where} via ${via}${sw}`;
+        const kv = result.kv ? ` — ${fmtGB(result.weights)}GB weights + ~${fmtGB(result.kv)}GB KV` : '';
+        return `Fits on ${where} via ${via}${sw}${kv}`;
     }
     if (result.reason === 'quant') return `Would fit VRAM on ${where}, but the required format is unsupported on this GPU`;
-    return `Exceeds available VRAM on ${where}`;
+    return `Exceeds available VRAM on ${where} (needs ${fmtGB(result.weights + result.kv)}GB)`;
 }
 
 function formatContextLength(tokens) {
@@ -216,14 +305,58 @@ function renderModels() {
     grid.classList.remove('hidden');
     noResults.classList.add('hidden');
     
+    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
+    const gpuConfig = GPU_CONFIG[gpuType];
+    const kvTokens = getKVContextTokens();
+
     grid.innerHTML = filteredModels.map(model => {
-        const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
-        const gpuConfig = GPU_CONFIG[gpuType];
-        const maxVRAM = gpuConfig.usableVram * 8;
-        const vramPercent = Math.min((model.vram / maxVRAM) * 100, 100);
-        const verdictClass = getVerdictClass(model);
         const contextLen = model.contextLength ? formatContextLength(model.contextLength) : '4K';
-        
+        const badges = `
+            <div class="flex flex-wrap gap-2 mb-4">
+                <span class="badge ${getQuantBadgeClass(model.prec)}">${model.prec}</span>
+                ${model.variants.slice(0, 2).map(v => `<span class="badge ${getQuantBadgeClass(v.prec)}">${v.prec} ${v.vram ? '@' + v.vram + 'GB' : ''}</span>`).join('')}
+                ${model.variants.length > 2 ? `<span class="badge badge-bf16">+${model.variants.length - 2}</span>` : ''}
+            </div>`;
+
+        // The budget bar is drawn for the CURRENTLY SELECTED GPU count, from the same
+        // modelFitsGPU() result that decides the ✓/✗ — so the bar always explains the
+        // verdict instead of contradicting it. With "Any" selected there is no config
+        // to draw against, so we show the minimum viable count instead.
+        let budgetHTML;
+        if (currentGPUFilter === 0) {
+            let min = null;
+            for (let g = 1; g <= 8; g++) { if (modelFitsGPU(model, g).fits) { min = g; break; } }
+            budgetHTML = `
+            <div class="mb-4 text-xs text-[#8888a0]">
+                Minimum to fit: <span class="${min ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-semibold">${min ? `${min}× ${gpuConfig.name}` : `won't fit on 8× ${gpuConfig.name}`}</span>
+                <span class="text-[#666680]">· pick a GPU count to see the memory budget</span>
+            </div>`;
+        } else {
+            const fit = modelFitsGPU(model, currentGPUFilter);
+            const usable = fit.usable;
+            const wPct = Math.max(0, Math.min(100, (fit.weights / usable) * 100));
+            const kPct = Math.max(0, Math.min(100 - wPct, (fit.kv / usable) * 100));
+            const total = fit.weights + fit.kv;
+            const over = total > usable;
+            budgetHTML = `
+            <div class="mb-4">
+                <div class="flex justify-between text-xs text-[#8888a0] mb-1">
+                    <span>${currentGPUFilter}× ${gpuConfig.name} budget</span>
+                    <span class="${over ? 'text-[#ef4444]' : 'text-[#8888a0]'}">${fmtGB(total)} / ${fmtGB(usable)} GB</span>
+                </div>
+                <div class="gpu-bar flex">
+                    <div class="gpu-bar-seg ${over ? 'seg-over' : 'seg-weights'}" style="width: ${wPct}%"></div>
+                    <div class="gpu-bar-seg seg-kv" style="width: ${kPct}%"></div>
+                </div>
+                <div class="flex gap-3 mt-1 text-[10px] text-[#666680]">
+                    <span><span class="dot ${over ? 'dot-over' : 'dot-weights'}"></span>weights ${fmtGB(fit.weights)}GB${fit.variant ? ` (${fit.variant.prec})` : ''}</span>
+                    ${kvTokens
+                        ? `<span><span class="dot dot-kv"></span>KV ~${fmtGB(fit.kv)}GB @ ${formatContextLength(kvTokens)}${kvMark(model)}</span>${kvNote(model)}`
+                        : `<span class="text-[#666680]">KV estimate off</span>`}
+                </div>
+            </div>`;
+        }
+
         return `
         <div class="card p-6 cursor-pointer" onclick="openModal(${model.id})">
             <div class="flex justify-between items-start mb-4">
@@ -231,16 +364,15 @@ function renderModels() {
                     <h3 class="font-semibold text-lg">${model.name}</h3>
                     <p class="text-sm text-[#8888a0]">${model.provider}</p>
                 </div>
-                ${model.tested ? '<span class="badge bg-[#22c55e]/20 text-[#22c55e] border border-[#22c55e]/30">TESTED</span>' : ''}
             </div>
-            
+
             <div class="grid grid-cols-3 gap-2 mb-4">
                 <div class="bg-[#12121a] rounded-lg p-3">
                     <div class="text-sm text-[#8888a0]">Params</div>
                     <div class="font-semibold">${model.params}</div>
                 </div>
                 <div class="bg-[#12121a] rounded-lg p-3">
-                    <div class="text-sm text-[#8888a0]">VRAM</div>
+                    <div class="text-sm text-[#8888a0]">Weights</div>
                     <div class="font-semibold">${model.vram} GB</div>
                 </div>
                 <div class="bg-[#12121a] rounded-lg p-3">
@@ -248,52 +380,15 @@ function renderModels() {
                     <div class="font-semibold">${contextLen}</div>
                 </div>
             </div>
-            
-            <div class="mb-4">
-                <div class="flex justify-between text-xs text-[#8888a0] mb-1">
-                    <span>GPU Feasibility (${gpuConfig.name})</span>
-                    <span>${model.vram}GB / ${maxVRAM}GB max</span>
-                </div>
-                <div class="gpu-bar">
-                    <div class="gpu-bar-fill ${verdictClass}" style="width: ${vramPercent}%"></div>
-                </div>
-            </div>
-            
-            <div class="flex flex-wrap gap-2 mb-4">
-                <span class="badge ${getQuantBadgeClass(model.prec)}">${model.prec}</span>
-                ${model.variants.slice(0, 2).map(v => `<span class="badge ${getQuantBadgeClass(v.prec)}">${v.prec} ${v.vram ? '@' + v.vram + 'GB' : ''}</span>`).join('')}
-                ${model.variants.length > 2 ? `<span class="badge badge-bf16">+${model.variants.length - 2}</span>` : ''}
-            </div>
-            
-            ${model.benchmark.mmlu != null ? `
-            <div class="space-y-2">
-                <div>
-                    <div class="flex justify-between text-xs mb-1">
-                        <span class="text-[#8888a0]">MMLU</span>
-                        <span>${model.benchmark.mmlu}%</span>
-                    </div>
-                    <div class="benchmark-bar">
-                        <div class="benchmark-fill" style="width: ${model.benchmark.mmlu}%"></div>
-                    </div>
-                </div>
-                ${model.benchmark.humaneval != null ? `
-                <div>
-                    <div class="flex justify-between text-xs mb-1">
-                        <span class="text-[#8888a0]">HumanEval</span>
-                        <span>${model.benchmark.humaneval}%</span>
-                    </div>
-                    <div class="benchmark-bar">
-                        <div class="benchmark-fill" style="width: ${model.benchmark.humaneval}%"></div>
-                    </div>
-                </div>
-                ` : ''}
-            </div>
-            ` : '<p class="text-xs text-[#8888a0]">No benchmark data available</p>'}
-            
+
+            ${budgetHTML}
+            ${badges}
+
             <div class="mt-4 pt-4 border-t border-[#2a2a3a] flex gap-2">
                 ${[1, 2, 4, 8].map(gpu => {
                     const result = modelFitsGPU(model, gpu);
-                    return `<div class="flex-1 text-center" title="${fitTooltip(result, gpu, gpuConfig)}">
+                    const sel = gpu === currentGPUFilter ? ' bg-[#1a1a28] rounded-lg' : '';
+                    return `<div class="flex-1 text-center py-1${sel}" title="${fitTooltip(result, gpu, gpuConfig)}">
                         <div class="text-xs text-[#8888a0]">${gpu}×</div>
                         <div class="${result.fits ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-bold text-lg">${result.fits ? (result.level === 'sw' ? '✓*' : '✓') : '✗'}</div>
                     </div>`;
@@ -301,6 +396,31 @@ function renderModels() {
             </div>
         </div>
     `}).join('');
+}
+
+// Estimate marker for a model's KV figure — never present an estimated number with
+// the same confidence as one read from the model's real config.
+//   ''  config      — read from the model's own HF config.json
+//   °   mirror      — same-architecture ungated mirror (original repo is gated)
+//   †   estimate    — hand-sourced geometry, no config available anywhere
+//   ‡   proxy       — no geometry at all; coarse params×tokens fallback
+//   ~   (always)    — every KV number is an estimate of a real allocation
+function kvMark(model) {
+    if (model.kvBytesPerToken == null) return '‡';
+    if (model.kvSource === 'estimate') return '†';
+    if (model.kvSource === 'mirror') return '°';
+    return '';
+}
+
+// A strikingly small KV figure is not a bug — it's sliding-window attention, where most
+// layers cap their cache at the window instead of growing with context. Say so on the
+// card, or the number reads as broken (DeepSeek-V4-Flash: a 284B model with ~0GB KV).
+function kvNote(model) {
+    if (hasNoKVCache(model)) return `<span class="text-[#666680]">· no KV cache (single-pass)</span>`;
+    if (model.kvWindow && model.kvSlidingBytesPerToken) {
+        return `<span class="text-[#666680]" title="Sliding-window attention: most layers cap their KV at a ${formatContextLength(model.kvWindow)}-token window instead of growing with the full context, so this model's KV stays far smaller than a full-attention model of the same size.">· SWA ${formatContextLength(model.kvWindow)}</span>`;
+    }
+    return '';
 }
 
 function updateStats() {
@@ -329,30 +449,62 @@ function openModal(id) {
     
     const kvTokens = getKVContextTokens();
     const kvGB = estKVCacheGB(model, kvTokens);
-    const kvBasis = model.kvBytesPerToken === 0
-        ? `no autoregressive KV cache — this is a single-pass diffusion/generative model, so context length adds no VRAM`
-        : model.kvBytesPerToken
-        ? `FP16 KV from the model's attention geometry (full-attention layers × KV-heads × head-dim)`
-        : `a rough params×tokens proxy — geometry wasn't available for this model, so it ignores GQA/MLA and over-estimates MoE`;
+    const dtypeLabel = getKVDtype() === 'fp8' ? 'FP8' : 'FP16';
+
+    // How the KV number was derived — spelled out, never implied.
+    const kvBasis = hasNoKVCache(model)
+        ? `no autoregressive KV cache — this is a single-pass diffusion/generative model, so context length adds no VRAM at all`
+        : model.kvBytesPerToken == null
+        ? `‡ a coarse params×tokens proxy — no attention geometry was available for this model, so it ignores GQA/MLA and over-estimates MoE`
+        : model.kvSource === 'estimate'
+        ? `† hand-sourced geometry (this repo is gated and has no public mirror) — an estimate, not read from the model's config`
+        : model.kvSource === 'mirror'
+        ? `° geometry from an ungated same-architecture mirror repo (the original is gated)`
+        : `${dtypeLabel} KV from the model's own HuggingFace config.json attention geometry`;
+
+    const swa = model.kvWindow && model.kvSlidingBytesPerToken
+        ? `<div class="text-xs text-[#8888a0] mt-2">This model uses <strong>sliding-window attention</strong>: only some layers cache the full context, the rest are capped at a ${formatContextLength(model.kvWindow)}-token window. Its KV therefore grows far more slowly than a full-attention model of the same size.</div>`
+        : '';
+
     const contextWarning = kvTokens
-        ? `<div class="text-xs text-[#f59e0b] mt-2">⚠️ KV-cache estimate at ${formatContextLength(kvTokens)} ctx ≈ <strong>+${kvGB.toFixed(1)} GB</strong> on top of weights (${kvBasis}).</div>`
+        ? `<div class="text-xs text-[#f59e0b] mt-2">≈ KV-cache estimate at ${formatContextLength(kvTokens)} ctx ≈ <strong>+${fmtGB(kvGB)} GB</strong> on top of weights (${kvBasis}).</div>${swa}`
         : `<div class="text-xs text-[#f59e0b] mt-2">⚠️ VRAM shown is weights only. Enable the KV-cache estimate (top filter bar) to factor in context length.</div>`;
-    
-    const benchmarks = model.benchmark;
-    const benchHTML = Object.entries(benchmarks)
-        .filter(([_, v]) => v !== null)
-        .map(([key, value]) => `
-            <div>
-                <div class="flex justify-between text-sm mb-1">
-                    <span class="text-[#8888a0]">${key.toUpperCase()}</span>
-                    <span class="font-semibold">${value}%</span>
-                </div>
-                <div class="benchmark-bar">
-                    <div class="benchmark-fill" style="width: ${value}%"></div>
-                </div>
-            </div>
-        `).join('') || '<p class="text-sm text-[#8888a0]">No benchmark data available</p>';
-    
+
+    // Memory budget for the currently-selected config, itemised the way vLLM accounts
+    // for it. Every line is a real quantity except the activation reserve, which is an
+    // assumption and is labelled as one.
+    const gpus = currentGPUFilter || 1;
+    const fit = modelFitsGPU(model, gpus);
+    const budget = getGPUBudget(gpus);
+    const reserve = gpus * getReserveGB();
+    const weights = fit.weights ?? model.vram;
+    const kvPool = Math.max(0, getGPUVRAM(gpus) - weights);
+    const conc = maxConcurrentRequests(model, weights, gpus, kvTokens);
+
+    const row = (label, val, cls = '') => `
+        <div class="flex justify-between py-2 border-b border-[#1a1a24]">
+            <span class="text-[#8888a0]">${label}</span><span class="font-medium ${cls}">${val}</span>
+        </div>`;
+
+    const budgetHTML = `
+        <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a] text-sm">
+            ${row(`Physical VRAM — ${gpus}× ${gpuConfig.name}`, `${gpus * gpuConfig.vram} GB`)}
+            ${row(`× GPU memory utilization (${getMemUtil()})`, `${fmtGB(budget)} GB`)}
+            ${row(`− Activation / CUDA-graph reserve <span class="text-[#f59e0b]">(assumption)</span>`, `−${fmtGB(reserve)} GB`, 'text-[#f59e0b]')}
+            ${row(`= Usable for weights + KV`, `${fmtGB(getGPUVRAM(gpus))} GB`, 'text-[#22c55e]')}
+            ${row(`− Model weights${fit.variant ? ` (${fit.variant.prec})` : ` (${model.prec})`}`, `−${fmtGB(weights)} GB`)}
+            ${row(`= KV cache pool`, `${fmtGB(kvPool)} GB`, kvPool > 0 ? 'text-[#22c55e]' : 'text-[#ef4444]')}
+            ${conc != null ? row(
+                `≈ Concurrent requests @ ${formatContextLength(kvTokens)} <span class="text-[#666680]">(worst case)</span>`,
+                `${conc}`, conc > 0 ? 'text-[#6366f1]' : 'text-[#ef4444]') : ''}
+        </div>
+        <p class="text-xs text-[#666680] mt-3">
+            Mirrors vLLM's own accounting: the KV cache is allocated greedily into whatever is left
+            inside <code>--gpu-memory-utilization</code> after weights and activations.
+            ${conc != null ? `The concurrency figure assumes <strong>every</strong> request fills the full ${formatContextLength(kvTokens)} context — real serving fits more, since requests are usually shorter and PagedAttention shares prefix blocks. Treat it as a floor.` : ''}
+            The activation reserve is an assumption: vLLM <em>measures</em> it by profiling a forward pass at startup, so it varies with batch size and model.
+        </p>`;
+
     const gpuFeasHTML = [1, 2, 3, 4, 5, 6, 7, 8].map(gpu => {
         const result = modelFitsGPU(model, gpu);
         const vram = getGPUVRAM(gpu);
@@ -362,7 +514,7 @@ function openModal(id) {
         const label = result.fits ? '✓ Fits' : '✗ Too Large';
         return `
             <div class="flex items-center justify-between bg-[#12121a] rounded-lg p-3" title="${fitTooltip(result, gpu, gpuConfig)}">
-                <span class="font-medium">${gpu}× ${gpuConfig.name} (${vram}GB usable)</span>
+                <span class="font-medium">${gpu}× ${gpuConfig.name} (${fmtGB(vram)}GB usable)</span>
                 <span class="${result.fits ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-bold">
                     ${label}<span class="text-xs text-[#8888a0]">${detail}</span>
                 </span>
@@ -407,9 +559,8 @@ function openModal(id) {
         </div>
 
         <div class="mb-8">
-            <h3 class="font-semibold mb-4">Benchmark Performance</h3>
-            <div class="space-y-4">${benchHTML}</div>
-            <p class="text-xs text-[#f59e0b] mt-3">⚠️ Indicative only — benchmarks are hand-curated from model cards/leaderboards, are <strong>not</strong> part of the vLLM recipe data, and are unverified for unreleased/preview models. Do not treat as authoritative.</p>
+            <h3 class="font-semibold mb-4">Memory Budget <span class="text-xs font-normal text-[#8888a0]">— ${gpus}× ${gpuConfig.name}</span></h3>
+            ${budgetHTML}
         </div>
 
         <div class="mb-8">
@@ -448,6 +599,7 @@ document.addEventListener('keydown', (e) => {
 const URL_CONTROLS = {
     gpuType: 'gpuTypeSelect', quant: 'quantFilter', type: 'typeFilter',
     context: 'contextFilter', sort: 'sortSelect', kv: 'kvContextSelect', q: 'searchInput',
+    util: 'memUtilSelect', reserve: 'reserveSelect', kvdtype: 'kvDtypeSelect',
 };
 let restoringState = false;
 
@@ -461,7 +613,10 @@ function syncStateToURL() {
         const isDefault = (id === 'sortSelect' && el.value === 'params')
             || (id === 'gpuTypeSelect' && el.value === 'L4-24GB')
             || (['quantFilter', 'typeFilter'].includes(id) && el.value === 'all')
-            || (['contextFilter', 'kvContextSelect'].includes(id) && el.value === '0');
+            || (['contextFilter', 'kvContextSelect'].includes(id) && el.value === '0')
+            || (id === 'memUtilSelect' && parseFloat(el.value) === DEFAULT_MEM_UTIL)
+            || (id === 'reserveSelect' && parseFloat(el.value) === DEFAULT_RESERVE_GB)
+            || (id === 'kvDtypeSelect' && el.value === 'fp16');
         if (!isDefault) params.set(key, el.value);
     }
     const qs = params.toString();
@@ -548,12 +703,15 @@ function openGPUInfoModal() {
                     </div>`;
     }).join('');
 
+    const util = getMemUtil();
+    const reserve = getReserveGB();
     const specRows = Object.values(GPU_CONFIG).map(cfg => `
                             <tr class="border-b border-[#1a1a24]">
                                 <td class="py-3 px-2 font-medium">${cfg.name}</td>
                                 <td class="py-3 px-2 text-[#8888a0]">${cfg.architecture} (${cfg.sm})</td>
                                 <td class="py-3 px-2 text-right">${cfg.vram} GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">${cfg.usableVram} GB</td>
+                                <td class="py-3 px-2 text-right text-[#8888a0]">${fmtGB(cfg.vram * util)} GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">${fmtGB(Math.max(0, cfg.vram * util - reserve))} GB</td>
                                 <td class="py-3 px-2 text-[#8888a0]">${cfg.memory}</td>
                             </tr>`).join('');
 
@@ -581,21 +739,27 @@ function openGPUInfoModal() {
             </div>
 
             <div>
-                <h3 class="text-xl font-bold mb-4 gradient-text">GPU Specifications</h3>
+                <h3 class="text-xl font-bold mb-4 gradient-text">GPU Specifications &amp; Memory Budget</h3>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead>
                             <tr class="border-b border-[#2a2a3a]">
                                 <th class="text-left py-3 px-2">GPU</th>
                                 <th class="text-left py-3 px-2">Architecture</th>
-                                <th class="text-right py-3 px-2">VRAM</th>
-                                <th class="text-right py-3 px-2">Usable (95%)</th>
+                                <th class="text-right py-3 px-2">Physical</th>
+                                <th class="text-right py-3 px-2">Budget (×${util})</th>
+                                <th class="text-right py-3 px-2">Weights + KV</th>
                                 <th class="text-left py-3 px-2">Memory</th>
                             </tr>
                         </thead>
                         <tbody>${specRows}
                         </tbody>
                     </table>
+                </div>
+                <div class="mt-3 text-xs text-[#666680] space-y-1">
+                    <p><strong class="text-[#8888a0]">Budget</strong> = physical × <code>--gpu-memory-utilization</code> (currently <strong>${util}</strong>). vLLM's own default is 0.90–0.92, so 0.95 is the optimistic end — change it in the filter bar.</p>
+                    <p><strong class="text-[#8888a0]">Weights + KV</strong> = budget − activation/CUDA-graph reserve (currently <strong>${fmtGB(reserve)} GB/GPU</strong>). <span class="text-[#f59e0b]">This reserve is an assumption</span> — vLLM measures it by profiling a forward pass at startup, so it varies with batch size and model. Adjust or zero it in the filter bar.</p>
+                    <p>vLLM then fills the remaining <strong class="text-[#8888a0]">KV cache pool</strong> greedily with cached tokens — which is what caps concurrency.</p>
                 </div>
             </div>
 

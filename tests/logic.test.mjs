@@ -6,8 +6,8 @@ import { loadApp } from './harness.mjs';
 import { normalizePrec as sharedNormalizePrec } from '../shared/prec.mjs';
 
 const app = loadApp();
-const { normalizePrec, isPrecCompatible, precSupportLevel, getGPUVRAM, estKVCacheGB,
-        modelFitsGPU, MODELS_DATA, GPU_CONFIG, GPU_QUANT_COMPAT } = app;
+const { normalizePrec, isPrecCompatible, precSupportLevel, getGPUVRAM, getGPUBudget,
+        estKVCacheGB, modelFitsGPU, MODELS_DATA, GPU_CONFIG, GPU_QUANT_COMPAT } = app;
 
 // ---------------------------------------------------------------------------
 // normalizePrec — priority order is the whole point (specific before generic)
@@ -108,21 +108,41 @@ test('isPrecCompatible: fail-safe — unknown GPU or unknown format returns true
 });
 
 // ---------------------------------------------------------------------------
-// getGPUVRAM — single source of truth, reads selected GPU type
+// Memory budget — mirrors vLLM: budget = physical x util; weights+KV = budget - reserve
 // ---------------------------------------------------------------------------
-test('getGPUVRAM: scales usable VRAM by GPU count (usable = floor(vram * 0.95))', () => {
-  app.setGpuType('L4-24GB');
-  assert.equal(getGPUVRAM(1), 22);     // floor(24 * 0.95) = 22
-  assert.equal(getGPUVRAM(8), 176);
-  app.setGpuType('H200-141GB');
-  assert.equal(getGPUVRAM(1), 133);    // floor(141 * 0.95) = 133
+test('getGPUBudget: physical x gpu-memory-utilization, scaled by GPU count', () => {
+  app.setMemUtil(0.95);
   app.setGpuType('A100-80GB');
-  assert.equal(getGPUVRAM(2), 152);
+  assert.equal(getGPUBudget(1), 76);        // 80 * 0.95
+  assert.equal(getGPUBudget(4), 304);
+  app.setMemUtil(0.90);                     // vLLM's own default
+  assert.equal(getGPUBudget(1), 72);        // 80 * 0.90
+  app.setMemUtil(0.95);
 });
 
-test('GPU_CONFIG: usableVram equals floor(vram * 0.95) for every GPU', () => {
+test('getGPUVRAM: usable = budget - activation reserve (per GPU)', () => {
+  app.setGpuType('A100-80GB');
+  app.setMemUtil(0.95);
+  app.setReserve(2);
+  assert.equal(getGPUVRAM(1), 74);          // 80*0.95 - 2
+  assert.equal(getGPUVRAM(4), 296);         // 4*(76 - 2)
+  app.setReserve(0);
+  assert.equal(getGPUVRAM(4), 304);         // reserve is genuinely subtractable
+  app.setReserve(app.DEFAULT_RESERVE_GB);
+});
+
+test('getGPUVRAM: the reserve is per-GPU, so it scales with GPU count', () => {
+  app.setGpuType('H100-80GB');
+  app.setMemUtil(0.95);
+  app.setReserve(4);
+  assert.equal(getGPUVRAM(8), 8 * (80 * 0.95 - 4));
+  app.setReserve(app.DEFAULT_RESERVE_GB);
+});
+
+test('GPU_CONFIG: carries PHYSICAL vram only — no baked-in usable value to drift', () => {
   for (const [key, cfg] of Object.entries(GPU_CONFIG)) {
-    assert.equal(cfg.usableVram, Math.floor(cfg.vram * 0.95), `${key} usableVram`);
+    assert.ok(cfg.vram > 0, `${key} vram`);
+    assert.equal(cfg.usableVram, undefined, `${key} must not bake in a usable value`);
   }
 });
 
@@ -146,18 +166,43 @@ test('modelFitsGPU: tiny model fits a single L4; huge model does not', () => {
 test('modelFitsGPU: the quant gate blocks a Blackwell-only NVFP4 variant on Hopper', () => {
   // DeepSeek-V3 (id 120): base FP8 671GB (weight-only), NVFP4 variant 336GB (Blackwell only).
   const m = MODELS_DATA.find(x => x.id === 120);
+  app.setMemUtil(0.95);
+  app.setReserve(2);
   app.setGpuType('H100-80GB');
-  // 8x H100 = 608GB: base FP8 (671) doesn't fit; NVFP4 (336) fits VRAM but is
-  // unsupported on Hopper, so the model is blocked by the quant gate.
+  // 8x H100 = 8*(80*0.95 - 2) = 592GB: base FP8 (671) doesn't fit; NVFP4 (336) fits
+  // VRAM but is unsupported on Hopper, so the model is blocked by the quant gate.
   const blocked = modelFitsGPU(m, 8);
   assert.equal(blocked.fits, false);
   assert.equal(blocked.reason, 'quant');
-  // 3x B200 = 546GB: base FP8 671 doesn't fit, NVFP4 336 fits VRAM AND is native → variant selected.
+  // 3x B200 = 3*(192*0.95 - 2) = 541GB: base FP8 671 doesn't fit; NVFP4 336 fits VRAM
+  // AND is Blackwell-native → the variant is selected.
   app.setGpuType('B200-192GB');
   const r = modelFitsGPU(m, 3);
   assert.equal(r.fits, true);
   assert.equal(r.variant.prec, 'NVFP4');
   assert.equal(r.level, 'native');
+});
+
+// The bar and the ✓/✗ used to disagree: the bar was drawn from base-precision weights
+// against a hardcoded 8-GPU denominator, while the verdict came from the fitting
+// variant against the SELECTED count. modelFitsGPU now returns the numbers the bar is
+// drawn from, so the two cannot drift apart.
+test('modelFitsGPU: returns the weights/kv/usable it actually decided on', () => {
+  app.setGpuType('B200-192GB');
+  app.setKVContext(0);
+  const m = MODELS_DATA.find(x => x.id === 120);
+  const r = modelFitsGPU(m, 3);
+  assert.equal(r.fits, true);
+  assert.equal(r.weights, r.variant.vram, 'weights must be the variant that was chosen, not the base');
+  assert.equal(r.usable, getGPUVRAM(3));
+  assert.ok(r.weights + r.kv <= r.usable, 'the reported numbers must satisfy the fit they claim');
+
+  // On a miss, weights = the model's SMALLEST candidate (its best case), so the bar
+  // says "even the smallest quantization overflows" rather than overstating.
+  const miss = modelFitsGPU(m, 1);
+  assert.equal(miss.fits, false);
+  const smallest = Math.min(m.vram, ...m.variants.map(v => v.vram));
+  assert.equal(miss.weights, smallest);
 });
 
 test('modelFitsGPU: fit is monotonic in GPU count', () => {
@@ -184,18 +229,74 @@ test('estKVCacheGB: zero when disabled, positive and monotonic in context', () =
 });
 
 test('estKVCacheGB: uses exact attention geometry (kvBytesPerToken) when present', () => {
-  const m = MODELS_DATA.find(x => x.kvBytesPerToken);
-  assert.ok(m, 'expected at least one model with synced KV geometry');
+  const m = MODELS_DATA.find(x => x.kvBytesPerToken && !x.kvSlidingBytesPerToken);
+  assert.ok(m, 'expected at least one full-attention model with synced KV geometry');
   // geometry path is exact: bytes/token × tokens / 1e9, independent of totalParams
   assert.equal(estKVCacheGB(m, 100000), m.kvBytesPerToken * 100000 / 1e9);
   assert.equal(estKVCacheGB(m, 0), 0);
 });
 
-test('data: kvBytesPerToken, when present, is a non-negative integer (0 = no KV cache)', () => {
+// The correction that matters most: sliding-window layers are CAPPED at the window,
+// so their KV stops growing once context exceeds it. Treating every layer as full
+// attention over-counted Gemma-class models by several × at long context.
+test('estKVCacheGB: sliding-window KV is capped at the window, not the context', () => {
+  const m = MODELS_DATA.find(x => x.kvSlidingBytesPerToken > 0 && x.kvWindow > 0);
+  assert.ok(m, 'expected at least one sliding-window model');
+  const win = m.kvWindow;
+  const expected = t => (m.kvBytesPerToken * t + m.kvSlidingBytesPerToken * Math.min(t, win)) / 1e9;
+  assert.equal(estKVCacheGB(m, win), expected(win));
+  assert.equal(estKVCacheGB(m, 131072), expected(131072));
+  // Beyond the window, ONLY the full-attention layers keep growing.
+  const growth = estKVCacheGB(m, 131072 * 2) - estKVCacheGB(m, 131072);
+  assert.equal(growth, m.kvBytesPerToken * 131072 / 1e9);
+  // And it must be strictly cheaper than pretending every layer were full attention.
+  const naive = (m.kvBytesPerToken + m.kvSlidingBytesPerToken) * 131072 / 1e9;
+  assert.ok(estKVCacheGB(m, 131072) < naive, 'sliding KV must be below the full-attention upper bound');
+});
+
+test('estKVCacheGB: FP8 KV cache (--kv-cache-dtype fp8) halves the footprint', () => {
+  const m = MODELS_DATA.find(x => x.kvBytesPerToken > 0);
+  app.setKVDtype('fp16');
+  const fp16 = estKVCacheGB(m, 131072);
+  app.setKVDtype('fp8');
+  assert.equal(estKVCacheGB(m, 131072), fp16 / 2);
+  app.setKVDtype('fp16');
+});
+
+test('estKVCacheGB: no-KV models (diffusion/generative) never consume KV at any context', () => {
+  const none = MODELS_DATA.filter(m => m.kvSource === 'none');
+  assert.ok(none.length > 0, 'expected some single-pass generative models');
+  for (const m of none) {
+    assert.equal(estKVCacheGB(m, 1048576), 0, `${m.name} must not consume KV`);
+  }
+});
+
+test('data: KV geometry fields are non-negative integers with a known provenance', () => {
+  const SOURCES = new Set(['config', 'mirror', 'estimate', 'none']);
   for (const m of MODELS_DATA) {
     if (m.kvBytesPerToken == null) continue;
     assert.ok(Number.isInteger(m.kvBytesPerToken) && m.kvBytesPerToken >= 0, `${m.name} kvBytesPerToken`);
+    assert.ok(SOURCES.has(m.kvSource), `${m.name} kvSource must be one of ${[...SOURCES]}, got ${m.kvSource}`);
+    // A sliding-layer budget is meaningless without the window that caps it.
+    if (m.kvSlidingBytesPerToken) {
+      assert.ok(m.kvWindow > 0, `${m.name} has sliding KV but no kvWindow to cap it`);
+    }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Worst-case concurrency — the KV pool left after weights
+// ---------------------------------------------------------------------------
+test('maxConcurrentRequests: derives from the KV pool, and shrinks as context grows', () => {
+  app.setGpuType('H200-141GB');
+  app.setMemUtil(0.95);
+  app.setReserve(2);
+  const m = MODELS_DATA.find(x => x.kvBytesPerToken > 0 && x.vram < 40);
+  const at32k = app.maxConcurrentRequests(m, m.vram, 2, 32768);
+  const at128k = app.maxConcurrentRequests(m, m.vram, 2, 131072);
+  assert.ok(at32k > 0, 'should fit at least one request at 32K');
+  assert.ok(at128k <= at32k, 'longer context must not increase concurrency');
+  assert.equal(app.maxConcurrentRequests(m, m.vram, 2, 0), null, 'null when KV estimate is off');
 });
 
 test('modelFitsGPU: enabling the KV estimate can turn a fit into a non-fit', () => {
@@ -230,8 +331,18 @@ test('data: every model has required, well-typed fields', () => {
     assert.equal(typeof m.totalParams, 'number');
     assert.ok(m.vram > 0, `${m.name} vram must be > 0`);
     assert.ok(Array.isArray(m.variants), `${m.name} variants must be an array`);
-    assert.ok(m.benchmark && typeof m.benchmark === 'object');
     assert.ok(m.hf_url && m.hf_url.includes('/'), `${m.name} hf_url must look like provider/model`);
+  }
+});
+
+// Benchmarks were REMOVED, not merely hidden: only 2 of 108 models expose structured
+// eval metrics on HuggingFace, so the old hand-curated MMLU/HumanEval numbers had no
+// verifiable source. Unsourced scores rendered as confident bars (and sortable!) are
+// worse than none — this guards against them creeping back in.
+test('data: no unsourced benchmark scores are carried in the dataset', () => {
+  for (const m of MODELS_DATA) {
+    assert.equal(m.benchmark, undefined, `${m.name} must not carry unsourced benchmark scores`);
+    assert.equal(m.tested, undefined, `${m.name} must not carry a meaningless tested flag`);
   }
 });
 

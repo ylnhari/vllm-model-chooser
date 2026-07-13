@@ -55,7 +55,9 @@ export function loadApp() {
   const exported = [
     'MODELS_DATA', 'GPU_CONFIG', 'GPU_QUANT_COMPAT',
     'normalizePrec', 'isPrecCompatible', 'precSupportLevel',
-    'getGPUVRAM', 'estKVCacheGB', 'modelFitsGPU', 'filterModels',
+    'getGPUVRAM', 'getGPUBudget', 'getMemUtil', 'getReserveGB',
+    'estKVCacheGB', 'modelFitsGPU', 'maxConcurrentRequests', 'filterModels',
+    'DEFAULT_MEM_UTIL', 'DEFAULT_RESERVE_GB',
   ];
   const wrapped = `${data}\n${code}\n;globalThis.__app = { ${exported.join(', ')} };`;
   vm.runInContext(wrapped, sandbox);
@@ -64,6 +66,9 @@ export function loadApp() {
     ...sandbox.__app,
     setGpuType(v) { document.getElementById('gpuTypeSelect').value = v; },
     setKVContext(v) { document.getElementById('kvContextSelect').value = String(v); },
+    setKVDtype(v) { document.getElementById('kvDtypeSelect').value = v; },
+    setMemUtil(v) { document.getElementById('memUtilSelect').value = String(v); },
+    setReserve(v) { document.getElementById('reserveSelect').value = String(v); },
     els,
     document,
   };

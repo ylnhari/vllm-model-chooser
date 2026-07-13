@@ -6,16 +6,19 @@ This file contains technical documentation for maintaining and extending the vLL
 
 Static, no-build web application that helps users select vLLM-compatible LLM models based on GPU hardware, VRAM requirements, context length, and quantization options. Served by any static server (`python3 -m http.server`).
 
-**File layout** (split as of the v1 refactor — sections further down may still say "single-file"; mentally substitute these files):
+**File layout:**
 - `index.html` — markup + styles; loads `data.js` then `app.js` as plain globals (no modules/bundler).
-- `data.js` — `GPU_CONFIG`, `GPU_QUANT_COMPAT`, `MODELS_DATA`. **Auto-generated** by `scripts/sync-data.mjs` from live vLLM recipes; curated fields (benchmark, weight-only vram, type, tested) are preserved across syncs. Don't hand-edit recipe-sourced fields (contextLength, variant precisions) — re-run the generator.
+- `data.js` — `GPU_CONFIG`, `GPU_QUANT_COMPAT`, `MODELS_DATA`. **Auto-generated** by `scripts/sync-data.mjs` from live vLLM recipes + HuggingFace configs. Only `type` and mixed-precision `vram` are curated. Don't hand-edit generated fields (`contextLength`, variant precisions, `recipe_id`, all `kv*`) — re-run the generator.
 - `app.js` — all logic + rendering.
+- `shared/prec.mjs` — `normalizePrec` + `BYTES_PER_PARAM`, imported by both Node scripts (and mirrored byte-for-byte into `app.js`, which is a classic browser script).
 - `scripts/sync-data.mjs` (regenerate data) · `scripts/factcheck.mjs` (audit vs recipes — `npm run factcheck`).
 - `tests/` — `npm test` (Node built-in runner, no deps). Run after any logic/data change.
 
-**`GPU_QUANT_COMPAT` is now a tri-state map**, not an array: `{ CANONICAL: 'native' | 'sw' }` — present key = supported (`native` = HW tensor cores, `sw` = vLLM software path), absent = unsupported. `precSupportLevel(prec, gpuType)` returns `'native' | 'sw' | null`; `isPrecCompatible` is just `precSupportLevel(...) !== null`.
+**`GPU_QUANT_COMPAT` is a tri-state map**, not an array: `{ CANONICAL: 'native' | 'sw' }` — present key = supported (`native` = HW tensor cores, `sw` = vLLM software path), absent = unsupported. `precSupportLevel(prec, gpuType)` returns `'native' | 'sw' | null`; `isPrecCompatible` is just `precSupportLevel(...) !== null`.
 
-**Critical**: VRAM values in `MODELS_DATA` must be **weight-only** (model stored weights only). KV cache is NOT included in the `vram` field — `app.js` has an optional, clearly-labelled KV-cache *estimate* (`estKVCacheGB`, a coarse params×tokens proxy) the user can toggle into the fit check.
+**`GPU_CONFIG` carries physical VRAM only** — no `usableVram`. The usable budget is derived at runtime (`physical × util − activation reserve`), both of which are user controls mirroring vLLM's `--gpu-memory-utilization`. See "The memory budget" below.
+
+**Critical**: `vram` in `MODELS_DATA` is **weight-only**. KV cache is never folded into it — it's computed separately from each model's real HF attention geometry (`estKVCacheGB`), including sliding-window layers, and the user toggles it into the fit check.
 
 ---
 
@@ -77,11 +80,13 @@ diverge, so **edit `shared/prec.mjs` and mirror the change into `app.js`**.
 3. Run `node scripts/sync-data.mjs`. It fills `contextLength`, adds recipe variant
    precisions, sets `recipe_id` casing, **computes weight-only `vram`** for pure
    precisions, and **computes `kvBytesPerToken`** from the HF `config.json`.
-4. Only these stay curated (the generator never overwrites them): `benchmark`
-   (recipes carry no eval data — hand-source from the model card, or leave `null`;
-   the UI labels them indicative), `type`, `tested`, and `vram` **only for
-   mixed-precision** models (MXFP4/`FP4+FP8`/`AMD-FP8`, where the naive formula is
-   wrong — e.g. gpt-oss).
+4. Only these stay curated (the generator never overwrites them): `type`, and `vram`
+   **only for mixed-precision** models (MXFP4/`FP4+FP8`/`AMD-FP8`, where the naive
+   formula is wrong — e.g. gpt-oss).
+5. **Do not add benchmark scores.** They were removed on purpose: only 2/108 models
+   expose structured eval metrics on HF (`cardData.model-index`), and those aren't
+   comparable across models. Hand-curated scores have no verifiable source, and this
+   tool's whole contract is that every number traces to one. A test enforces this.
 
 ### Add a new QUANTIZATION format
 1. `shared/prec.mjs`: add the recognizer to `normalizePrec` **before** any generic
@@ -101,540 +106,125 @@ diverge, so **edit `shared/prec.mjs` and mirror the change into `app.js`**.
 
 ### Add a new GPU
 Edit **both** `GPU_CONFIG` and `GPU_QUANT_COMPAT` in `scripts/sync-data.mjs` (not
-`data.js` — it's generated), keep `usableVram = floor(vram * 0.95)`, add a `<option>`
-to `#gpuTypeSelect` in `index.html`, regenerate, verify. The info-modal table and
-snapshot cards are data-driven and update themselves.
+`data.js` — it's generated). `GPU_CONFIG` carries **physical `vram` only** — do NOT add a
+`usableVram`: the usable budget is derived at runtime from the user's memory-utilization
+knob, and a second baked-in value would just drift. Add a `<option>` to `#gpuTypeSelect`
+in `index.html`, regenerate, verify. The info-modal table and snapshot cards are
+data-driven and update themselves.
+
+### The memory budget (why there's no `usableVram`)
+The app mirrors vLLM's own accounting:
+
+```
+budget        = physical × gpu-memory-utilization   # #memUtilSelect, default 0.95
+weights + KV  = budget − activation reserve         # #reserveSelect, default 2 GB/GPU
+KV pool       = (weights + KV) − weights            # vLLM fills this greedily
+```
+
+`getGPUVRAM(gpus)` is the single source of truth for the capacity check. The **activation
+reserve is an assumption, and must stay visibly labelled as one** — vLLM does not compute
+it, it *measures* it by profiling a forward pass at startup, and it scales with
+`--max-num-batched-tokens`. Never bury it in a constant; it's a user control (settable to 0)
+and carries a `*` marker in the UI. Same principle for the util default (0.95 is more
+optimistic than vLLM's own 0.90–0.92 — so the user gets to choose).
 
 ### Add a new ARCHITECTURE (KV-cache geometry)
-`kvBytesPerToken` (bytes/token, FP16 KV) is computed by `kvBytesPerTokenFromConfig()`
-in sync-data.mjs from the HF `config.json`; the app multiplies it by context tokens.
-**Every model should carry a value** — `> 0` (real geometry), or `0` (no autoregressive
-KV cache: diffusion/image/video/audio generators). Absent means the app falls back to a
-coarse params proxy — treat that as a gap to close, not the norm.
+KV is **not** a single bytes-per-token constant. The app computes:
 
-The generator resolves geometry through a fallback chain (`fetchConfigKV`):
-1. **Direct** `config.json`, then `params.json` (Mistral consolidated format).
-2. **Ungated mirror** (`HF_CONFIG_MIRROR`) — gated repos (HF 401, e.g. Meta Llama,
-   gated Gemma) map to a same-architecture public mirror so real geometry is *fetched,
-   not guessed*. Add `gated_id: mirror_id` here for new gated models.
-3. **Explicit override** (`KV_GEOMETRY_OVERRIDES`) — `0` for generative/no-KV models;
-   `{ layers, kvHeads, headDim }` for the rare gated model with no mirror (cite the
-   source; mark clearly if it's an estimate, as `plamo-3` is).
+```
+KV(tokens) = kvBytesPerToken × tokens
+           + kvSlidingBytesPerToken × min(tokens, kvWindow)
+```
 
-Layer-count and attention-type handling already covered, keyed off config fields:
-- **layer count**: `hybrid_override_pattern` (count `*`) and `layers_block_type` (count
-  `*attention*`) for Mamba/attention hybrids (Nemotron-H); `layer_types` → count
-  `full_attention` for linear/full hybrids; else `num_hidden_layers`/`n_layers`.
-- **attention type**: MLA (`kv_lora_rank + qk_rope_head_dim`, single latent — DeepSeek);
-  GQA/MHA (`num_key_value_heads × head_dim`, ×2 K/V). `head_dim` falls back to
-  `attention_head_dim` or `hidden_size/num_attention_heads`.
-- **nesting**: `descendToAttn()` unwraps `text_config` / `thinker_config` / `decoder` /
-  … for multimodal/omni configs; `tolerantJson()` survives `Infinity`/`NaN` literals.
+because **sliding-window layers are capped at the window** however long the context grows.
+Getting this wrong is not academic: treating every layer as full attention overstated
+`gemma-4-31B` at 128K as 128.8 GB when the truth is 22.3 GB (**5.8×**), wrongly excluding
+it from GPUs it fits. Gemma-3/4, Step-3.7, Voxtral and DeepSeek-V4 are all mostly sliding.
 
-For a genuinely new scheme (e.g. a linear/SSM type that hides its layout), add a branch
-keyed on a distinctive field or `model_type`, re-sync, and spot-check `@128K` GB looks
-sane: dense-70B ≈ 43GB, MLA-671B ≈ 9GB, Mamba-hybrid / mostly-linear ≈ single-digit GB.
+`kvBytesPerTokenFromConfig()` in sync-data.mjs returns `{ full, sliding, window }` from the
+HF `config.json`. **Every model should carry geometry**, plus a `kvSource` provenance tag —
+absent geometry means the app falls back to a coarse params proxy (`‡`), a gap to close.
+
+Fallback chain (`fetchConfigKV`), which also sets `kvSource`:
+1. **Direct** `config.json`, then `params.json` (Mistral consolidated) → `kvSource: 'config'`.
+2. **Ungated mirror** (`HF_CONFIG_MIRROR`) — gated repos (HF 401, e.g. Meta Llama) map to a
+   same-architecture public mirror so geometry is *fetched, not guessed* → `'mirror'` (`°`).
+3. **Explicit override** (`KV_GEOMETRY_OVERRIDES`) — `0` for generative/no-KV models
+   (→ `'none'`); `{ layers, kvHeads, headDim }` for the rare gated model with no mirror
+   (→ `'estimate'`, `†` — cite the source, as `plamo-3` does).
+
+The two halves of the computation, keyed off config fields:
+- **per-layer bytes** (`perLayerKVBytes`): MLA (`kv_lora_rank + qk_rope_head_dim` — a single
+  compressed latent, **not** ×heads, **not** ×2 — DeepSeek); else GQA/MHA
+  (`2 × num_key_value_heads × head_dim × 2B`). `head_dim` falls back to `attention_head_dim`
+  or `hidden_size / num_attention_heads`.
+- **layer classification** (`classifyLayers`): `hybrid_override_pattern` (count `*`) and
+  `layers_block_type` (count `*attention*`) for Mamba/attention hybrids — **Mamba layers
+  cache nothing and are excluded from both counts**; `layer_types` → split `full_attention`
+  vs `sliding_attention`; else `sliding_window` + `sliding_window_pattern` (Gemma-3 style:
+  every Nth layer is global, the rest slide); else all layers are full attention.
+  A sliding split with no declared window is treated as full attention rather than silently
+  under-counting.
+- **nesting**: `descendToAttn()` unwraps `text_config` / `thinker_config` / `decoder` / … for
+  multimodal/omni configs; `tolerantJson()` survives `Infinity`/`NaN` literals.
+
+For a genuinely new scheme, add a branch keyed on a distinctive field or `model_type`,
+re-sync, and spot-check `@128K` looks sane: dense-70B ≈ 43GB, MLA-671B ≈ 9GB, Mamba-hybrid
+or mostly-sliding ≈ single-digit to low-tens GB. **Beware the under-count direction** — it
+makes a model claim to fit when it won't, which is the harmful error.
 
 ---
 
-## GPU Quantization Compatibility System
-
-This is the most architecturally significant part of the application. Models are checked against BOTH available VRAM AND quantization format compatibility when determining if a model fits a GPU configuration.
-
-### Data Flow
-
-```
-User selects GPU type + GPU count
-                ↓
-modelFitsGPU(model, gpus)
-    ├── getGPUVRAM(gpus)          → total usable VRAM
-    ├── model.vram <= vram        → weight-only VRAM check
-    ├── isPrecCompatible(prec, gpuType) → quantization format check
-    └── (variant loop)            → try each variant (VRAM + quant check)
-                ↓
-    Returns { fits: true/false, variant: {...} }
-```
-
-### Key Data Structures
-
-```javascript
-// ~Line 254: GPU hardware specs
-const GPU_CONFIG = {
-    'L4-24GB': { vram: 24, usableVram: 23, architecture: 'Ada Lovelace', name: 'L4 24GB' },
-    'A100-80GB': { vram: 80, usableVram: 76, architecture: 'Ampere', name: 'A100 80GB' },
-    'H100-80GB': { vram: 80, usableVram: 76, architecture: 'Hopper', name: 'H100 80GB' },
-    'H200-141GB': { vram: 141, usableVram: 134, architecture: 'Hopper', name: 'H200 141GB' },
-    'B100-192GB': { vram: 192, usableVram: 182, architecture: 'Blackwell', name: 'B100 192GB' },
-    'B200-192GB': { vram: 192, usableVram: 182, architecture: 'Blackwell', name: 'B200 192GB' },
-};
-
-// ~Line 263: Quantization formats supported per GPU
-const GPU_QUANT_COMPAT = {
-    'L4-24GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16'],
-    'A100-80GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16'],
-    'H100-80GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'MXFP4'],
-    'H200-141GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'MXFP4'],
-    'B100-192GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'NVFP4', 'NVFP4-QAD', 'MXFP4', 'MXFP8'],
-    'B200-192GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'NVFP4', 'NVFP4-QAD', 'MXFP4', 'MXFP8'],
-};
-```
-
-### GPU Quantization Compatibility Reference
-
-| Format    | L4 (Ada)       | A100 (Ampere)   | H100/H200 (Hopper) | B100/B200 (Blackwell) |
-|-----------|----------------|-----------------|---------------------|----------------------|
-| BF16      | Native HW ✓    | Native HW ✓     | Native HW ✓         | Native HW ✓          |
-| FP8       | Native HW ✓    | vLLM SW ✓       | Native HW ✓         | Native HW ✓          |
-| INT4/AWQ  | vLLM SW ✓      | vLLM SW ✓       | vLLM SW ✓           | vLLM SW ✓            |
-| NVFP4     | ✗              | ✗               | ✗                   | Native HW ✓          |
-| MXFP4     | ✗              | ✗               | vLLM SW ✓           | Native HW ✓          |
-| MXFP8     | ✗              | ✗               | ✗                   | vLLM SW ✓            |
-
-**Key rules:**
-- `Native HW` = GPU has dedicated tensor cores for this format
-- `vLLM SW` = Format is emulated in software (Marlin kernel, etc.) — no native hardware support
-- `✗` = Format is completely unsupported on this architecture
-
-### normalizePrec() — Format Normalization
-
-Maps any precision string to a canonical format name. **Priority order matters** — more specific formats are checked before generic ones:
-
-1. `NVFP4` — matches "NVFP4", "NVFP4-QAD"
-2. `MXFP4` — matches "MXFP4" (checked before FP8 to avoid "MXFP4" matching "FP8" substring)
-3. `MXFP8` — matches "MXFP8" (checked before FP8 to avoid "MXFP8" matching "FP8" substring)
-4. `NVFP4` (FP4 fallback) — matches "FP4+FP8" (compound format from DeepSeek) or bare "FP4"
-5. `FP8` — matches "FP8", "AMD-FP8"
-6. `BF16` — exact match only
-7. `INT4` — matches "INT4", "AWQ", "GPTQ", "W4A16", "QAT-W4A16"
-8. `null` — unrecognized formats (e.g. "300B-A47B")
-
-**Rule**: FP4 variants must be checked BEFORE FP8 because "FP4+FP8" also contains "FP8".
-
-### isPrecCompatible(prec, gpuType) — Compatibility Gate
-
-```javascript
-function isPrecCompatible(prec, gpuType) {
-    const formats = GPU_QUANT_COMPAT[gpuType];
-    if (!formats) return true;        // unknown GPU → allow
-    const norm = normalizePrec(prec);
-    if (!norm) return true;            // unknown format → allow
-    return formats.includes(norm);     // check against supported list
-}
-```
-
-**Edge cases:**
-- Unknown GPU type: returns `true` (allow, don't break)
-- Unknown precision string: returns `true` (allow, don't break)
-- null/undefined precision: returns `true` (allow)
-
-### modelFitsGPU(model, gpus) — Feasibility Check
-
-```javascript
-function modelFitsGPU(model, gpus) {
-    if (gpus === 0) return { fits: true, reason: "Any configuration" };
-    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
-    const vram = getGPUVRAM(gpus);
-    // Check 1: Base model precision fits VRAM AND is compatible
-    if (model.vram <= vram && isPrecCompatible(model.prec, gpuType)) return { fits: true };
-    // Check 2: Try each variant
-    if (model.variants.length > 0) {
-        for (const v of model.variants) {
-            if (v.vram && v.vram <= vram && isPrecCompatible(v.prec || model.prec, gpuType))
-                return { fits: true, variant: v };
-        }
-    }
-    return { fits: false };
-}
-```
-
-**Both VRAM AND quantization must pass** for a model to be marked as fitting.
-
-### GPU_QUANT_COMPAT Maintenance Rules
-
-#### Adding a new GPU
-1. Add entry to `GPU_CONFIG` with VRAM specs
-2. Add entry to `GPU_QUANT_COMPAT` with supported formats
-3. Add `<option>` in HTML select element
-4. Add GPU card in `openGPUInfoModal()` (Native HW / vLLM SW sections)
-5. Add rows to GPU specifications table and quantization compatibility table in `openGPUInfoModal()`
-
-#### Adding a new quantization format
-1. Add canonical name to `normalizePrec()` priority chain
-2. Add canonical name to `GPU_QUANT_COMPAT` entries for compatible GPUs
-3. Add format row to quantization compatibility table in `openGPUInfoModal()`
-4. Add badge CSS class if needed
-5. Add entry in `getQuantBadgeClass()`
-
-#### When vLLM adds software support for an existing format on a new GPU
-1. Add the format's canonical name to that GPU's array in `GPU_QUANT_COMPAT`
-2. Update the quantization compatibility table in `openGPUInfoModal()`
-
----
-
-## Code Architecture
-
-### Main Data Structures
-
-```javascript
-// GPU Configuration
-const GPU_CONFIG = {
-    'A100-80GB': { vram: 80, usableVram: 76, architecture: 'Ampere', name: 'A100 80GB' },
-    // ... other GPUs (see section above)
-};
-
-// GPU Quantization Compatibility
-const GPU_QUANT_COMPAT = {
-    'A100-80GB': ['BF16', 'FP8', 'INT4', 'AWQ', 'GPTQ', 'W4A16'],
-    // ... other GPUs (see section above)
-};
-
-// Model Data Array - one entry per model
-const MODELS_DATA = [
-    {
-        id: 1,
-        name: "Model-Name",
-        provider: "ProviderName",
-        params: "100B/10B",        // display string
-        totalParams: 100,          // total parameters
-        activeParams: 10,          // active parameters (for MoE)
-        prec: "BF16",              // default precision
-        vram: 200,                 // WEIGHT-ONLY VRAM in GB
-        variants: [
-            { prec: "FP8", vram: 100 },
-            { prec: "NVFP4", vram: 50, note: "Blackwell only" }
-        ],
-        type: "text",              // text, vision, moe, embedding
-        contextLength: 131072,     // context window (optional)
-        benchmark: { mmlu: 85.2, humaneval: 72.4 },
-        hf_url: "provider/model-name"
-    }
-];
-```
-
-### Critical Rules
-
-1. **VRAM is Weight-Only Only**: Never include KV cache in `vram` field
-2. **95% GPU Utilization**: `usableVram = Math.floor(vram * 0.95)`
-3. **Single Function Definition**: Never duplicate `getGPUVRAM`, `modelFitsGPU`, or any core function
-4. **Dual Check in modelFitsGPU**: Always check BOTH VRAM capacity AND quantization compatibility
-5. **vLLM URL Format**: `https://recipes.vllm.ai/{Provider}/{Model}.json` (Provider capitalized)
-6. **normalizePrec Priority**: Specific formats (NVFP4, MXFP4, MXFP8) before generic (FP8, FP4)
-
----
-
-## Essential Functions
-
-### VRAM Calculation
-
-```javascript
-// ~Line 293: Single source of truth for GPU VRAM
-function getGPUVRAM(gpus) {
-    const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
-    return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);  // 72 is fallback for unknown GPU
-}
-```
-
-### Quantization Format Detection (Badge Styling)
-
-```javascript
-// ~Line 515: Used for badge CSS class only (NOT for compatibility logic)
-function getQuantBadgeClass(prec) {
-    if (prec.includes('BF16')) return 'badge-bf16';
-    if (prec.includes('FP8')) return 'badge-fp8';
-    if (prec.includes('INT4') || prec.includes('GPTQ') || prec.includes('AWQ')) return 'badge-int4';
-    if (prec.includes('NVFP4') || prec.includes('FP4')) return 'badge-nvfp4';
-    if (prec.includes('MXFP4')) return 'badge-mxfp4';
-    if (prec.includes('QAT')) return 'badge-int4';
-    return 'badge-bf16';
-}
-```
-
-### Bytes Per Parameter by Precision
-
-| Precision | Bytes/Param |
-|-----------|-------------|
-| BF16      | 2           |
-| FP8       | 1           |
-| INT4/AWQ/GPTQ | 0.5     |
-| NVFP4/FP4 | 0.5         |
-| MXFP4     | 0.5         |
-| MXFP8     | 1           |
-| W4A16     | 0.5         |
-
----
-
-## Common Bugs and How to Fix Them
-
-### Bug: Model Shows as Fitting When It Shouldn't
-
-**Cause 1**: Duplicate `getGPUVRAM` function with hardcoded value.
-
-**Fix**: Search for `function getGPUVRAM` — there should be exactly ONE. Remove duplicates.
-
-**Cause 2**: `modelFitsGPU` only checks VRAM, not quantization compatibility.
-
-**Fix**: Ensure `modelFitsGPU` calls `isPrecCompatible()` for both base precision and each variant:
-```javascript
-// CORRECT
-if (model.vram <= vram && isPrecCompatible(model.prec, gpuType)) return { fits: true };
-if (v.vram && v.vram <= vram && isPrecCompatible(v.prec || model.prec, gpuType)) return { fits: true, variant: v };
-```
-
-### Bug: Wrong GPU VRAM Being Used
-
-**Cause**: Hardcoded fallback like `|| 72` or `* 72`.
-
-**Fix**: Ensure `getGPUVRAM` reads from `GPU_CONFIG` and uses a fallback for unknown GPUs:
-```javascript
-// CORRECT
-return gpus * (GPU_CONFIG[gpuType]?.usableVram || 72);
-```
-
-### Bug: VRAM Values Don't Match vLLM Recipes
-
-**Cause**: VRAM includes KV cache or uses wrong precision multiplier.
-
-**Fix**: Calculate weight-only VRAM:
-- BF16: `totalParams * 2`
-- FP8: `totalParams * 1`
-- INT4/AWQ/GPTQ/NVFP4/MXFP4/W4A16: `totalParams * 0.5`
-- MXFP8: `totalParams * 1`
-
-### Bug: normalizePrec Returns Wrong Format
-
-**Cause**: Priority order is wrong — a generic check (e.g. `FP8`) matches before a specific one (e.g. `MXFP8` or `NVFP4`).
-
-**Fix**: Always place more specific formats FIRST in the if-else chain:
-```javascript
-// Specific formats first
-if (upper.includes('NVFP4')) return 'NVFP4';
-if (upper.includes('MXFP4')) return 'MXFP4';
-if (upper.includes('MXFP8')) return 'MXFP8';
-// Compound format (DeepSeek FP4+FP8 → treated as NVFP4)
-if (upper === 'FP4+FP8' || (upper.includes('FP4') && !upper.includes('FP8'))) return 'NVFP4';
-// Then generic formats
-if (upper.includes('FP8')) return 'FP8';
-```
-
-### Bug: MXFP8 Shows as FP8
-
-**Cause**: "MXFP8".includes("FP8") is true → caught by FP8 check before MXFP8 check.
-
-**Fix**: MXFP8 must be checked before FP8 in `normalizePrec()`.
-
-### Bug: modelFitsGPU VRAM Not Updating When GPU Type Changes
-
-**Cause**: `modelFitsGPU` doesn't read from DOM, caches old value.
-
-**Fix**: `modelFitsGPU` reads `document.getElementById('gpuTypeSelect')?.value` fresh each call.
-
----
-
-## Data Update Workflow
-
-### Step 1: Check for New Models
+## Reference
+
+The compatibility matrix, GPU specs, memory-budget formula and KV formula live in
+**`README.md`** — and, authoritatively, in the code itself (`scripts/sync-data.mjs` for
+`GPU_CONFIG` / `GPU_QUANT_COMPAT` / KV geometry, `app.js` for the fit logic). This file
+does not restate them: a duplicated matrix is a matrix that goes stale, and this section
+previously did exactly that (it still described `GPU_QUANT_COMPAT` as an array of format
+strings long after it became a tri-state `{ FORMAT: 'native' | 'sw' }` map, and had MXFP4
+marked unsupported on A100 when the recipes explicitly run gpt-oss on one).
+
+### The invariants that actually matter
+
+1. **`data.js` is generated.** Never hand-edit recipe- or config-sourced fields
+   (`contextLength`, variant precisions, `recipe_id`, `vram` for pure precisions, all `kv*`
+   fields). Re-run `node scripts/sync-data.mjs`.
+2. **`vram` is weight-only.** Never fold KV cache into it. Recipe `vram_minimum_gb` is
+   KV-inclusive — do not copy it into our `vram` field.
+3. **One `getGPUVRAM`.** It is the single source of truth for capacity
+   (`physical × util − reserve`). Never add a second definition or a hardcoded fallback.
+4. **Dual check.** `modelFitsGPU` must gate on BOTH capacity AND `precSupportLevel`.
+   It returns the numbers the UI draws (`weights`/`kv`/`usable`) so the card's bar and its
+   ✓/✗ are physically incapable of disagreeing — they used to, badly.
+5. **`normalizePrec`: specific before generic.** `MXFP8` must be matched before `FP8`, and
+   the FP4 family before `FP8`, or `"MXFP8"`/`"FP4+FP8"` silently become `FP8`. It lives in
+   `shared/prec.mjs`, mirrored byte-for-byte into `app.js` (drift-guarded by a test).
+6. **Every displayed number traces to a source.** Recipes, HF `config.json`, or an NVIDIA
+   datasheet — or it is computed from those and marked as an estimate (`~ ≈ ° † ‡ *`).
+   If you cannot source it, do not display it. This is why benchmarks are gone.
+
+### Verification loop (run all three, always)
 
 ```bash
-# Get list of all vLLM recipes
-curl https://recipes.vllm.ai/models.json | jq '.[] | .hf_id'
-
-# Compare with current MODELS_DATA hf_url values
+node scripts/sync-data.mjs   # rebuild data.js from live recipes + HF configs
+npm run factcheck            # must end "Total discrepancies: 0"
+npm test                     # must be all-pass
 ```
 
-### Step 2: Fetch Model Recipe
+`factcheck` audits `data.js` against the live recipes (inventory, context length, parameter
+counts, variant precisions, and the pure-precision VRAM formula). `npm test` additionally
+guards the things no external source can check for us: normalizer drift, fit monotonicity,
+KV sliding-window capping, the tri-state compat map, and the absence of unsourced scores.
 
-```bash
-curl https://recipes.vllm.ai/{Provider}/{Model}.json | jq '{
-  name: .meta.title,
-  provider: .meta.provider,
-  param_count: .model.parameter_count,
-  active_params: .model.active_parameters,
-  context_length: .model.context_length,
-  default_vram: .variants.default.vram_minimum_gb,
-  variants: .variants
-}'
-```
+### Sanity numbers (spot-check after any KV change)
 
-### Step 3: Calculate Weight-Only VRAM
+| Model shape | KV @ 128K, FP16 |
+|---|---|
+| dense 70B (GQA, full attention) | ≈ 43 GB |
+| MLA 671B (DeepSeek) | ≈ 9 GB |
+| mostly-sliding 31B (Gemma-class) | ≈ 22 GB (**not** ~129 GB — that's the full-attention error) |
+| diffusion / single-pass generative | 0 GB at any context |
 
-Use the formula directly (vLLM recipe `vram_minimum_gb` includes KV cache, so don't rely on it for weight-only):
-- BF16: `totalParams * 2`
-- FP8: `totalParams * 1`
-- INT4/AWQ/GPTQ/NVFP4/MXFP4/W4A16: `totalParams * 0.5`
-- MXFP8: `totalParams * 1`
-
-### Step 4: Verify HuggingFace Model ID
-
-Check that `hf_url` matches the actual HuggingFace model ID:
-```
-https://huggingface.co/{hf_url}
-```
-
-### Step 5: Validate JavaScript
-
-```bash
-node -e "
-const fs = require('fs');
-const html = fs.readFileSync('index.html', 'utf8');
-const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-const script = scripts[scripts.length-1][1];
-try {
-    new Function(script);
-    console.log('JavaScript syntax: OK');
-} catch(e) {
-    console.log('ERROR:', e.message);
-}
-"
-```
-
----
-
-## GPU Types Reference
-
-When adding a new GPU, update ALL of:
-1. `GPU_CONFIG` object
-2. `GPU_QUANT_COMPAT` object  
-3. HTML `<select>` element
-4. GPU compatibility card (Native HW / vLLM SW sections in `openGPUInfoModal()`)
-5. GPU specifications table in `openGPUInfoModal()`
-6. Quantization compatibility table in `openGPUInfoModal()`
-
-```javascript
-// JavaScript format
-'GPU-NAME': { vram: XXX, usableVram: Math.floor(XXX * 0.95), architecture: 'Name', name: 'Display Name' }
-
-// Also add to GPU_QUANT_COMPAT
-'GPU-NAME': ['BF16', 'FP8', /* ... supported formats */]
-```
-
-### Current GPUs
-
-| Key | Name | VRAM | Usable (95%) | Architecture | SM Version |
-|-----|------|------|--------------|--------------|------------|
-| L4-24GB | L4 24GB | 24 | 23 | Ada Lovelace | sm_89 |
-| A100-80GB | A100 80GB | 80 | 76 | Ampere | sm_80 |
-| H100-80GB | H100 80GB | 80 | 76 | Hopper | sm_90 |
-| H200-141GB | H200 141GB | 141 | 134 | Hopper | sm_90 |
-| B100-192GB | B100 192GB | 192 | 182 | Blackwell | sm_100 |
-| B200-192GB | B200 192GB | 192 | 182 | Blackwell | sm_100 |
-
----
-
-## Adding New Model Example
-
-```javascript
-// 1. Fetch recipe
-// curl https://recipes.vllm.ai/Qwen/Qwen3-32B.json
-
-// 2. Extract data:
-// - name, provider, params, totalParams, activeParams, prec, vram, contextLength, hf_url
-
-// 3. Calculate weight-only VRAM:
-// - IF prec is BF16: vram = totalParams * 2
-// - IF prec is FP8: vram = totalParams * 1
-// - IF prec is MXFP8: vram = totalParams * 1
-// - IF prec is INT4/NVFP4/MXFP4/W4A16: vram = totalParams * 0.5
-
-// 4. Add variants (map from recipe .variants object)
-
-// 5. Add to MODELS_DATA with unique ID
-{
-    id: 200,  // use next available ID
-    name: "Qwen3-32B",
-    provider: "Qwen",
-    params: "32B",
-    totalParams: 32,
-    activeParams: 32,
-    prec: "BF16",
-    vram: 64,              // 32 × 2 for BF16
-    variants: [
-        { prec: "FP8", vram: 32 },     // 32 × 1 for FP8
-        { prec: "AWQ", vram: 16 }      // 32 × 0.5 for AWQ
-    ],
-    type: "text",
-    contextLength: 40960,
-    benchmark: { mmlu: 76.8, humaneval: 55.4, math: 52.5 },
-    hf_url: "Qwen/Qwen3-32B"
-}
-```
-
----
-
-## Adding New Quantization Format Example
-
-If a new format like "FP6" is introduced:
-
-```javascript
-// 1. Add to normalizePrec() before the generic FP8 check
-function normalizePrec(prec) {
-    if (upper.includes('FP6')) return 'FP6';
-    // ... existing checks ...
-}
-
-// 2. Add to GPU_QUANT_COMPAT for supported GPUs
-'B200-192GB': ['BF16', 'FP8', 'FP6', 'INT4', 'AWQ', 'GPTQ', 'W4A16', 'NVFP4', 'NVFP4-QAD', 'MXFP4', 'MXFP8'],
-
-// 3. Add badge CSS class
-.badge-fp6 { background: rgba(...); color: ...; border: ...; }
-
-// 4. Add to getQuantBadgeClass()
-if (prec.includes('FP6')) return 'badge-fp6';
-
-// 5. Add to GPU compatibility modal table
-```
-
----
-
-## Validation Before Changes
-
-1. JavaScript syntax check (see Step 5 above)
-2. Verify `getGPUVRAM()` exists exactly once
-3. Test with L4 24GB — models >23GB should NOT fit on 1 GPU
-4. Test NVFP4 variant on A100 — should NOT fit (NVFP4 unsupported on Ampere)
-5. Test NVFP4 variant on B200 — should fit (Blackwell native)
-6. Test MXFP4 variant on H100 — should fit (vLLM SW support)
-7. Test MXFP8 variant on H100 — should NOT fit (unsupported)
-8. Verify modal warns about KV cache overhead for long contexts (not included in VRAM)
-9. Test `FP4+FP8` compound format (DeepSeek models) — treated as NVFP4
-
----
-
-## Quick Reference
-
-| Component | Location | Notes |
-|-----------|----------|-------|
-| `GPU_CONFIG` | ~Line 232 | GPU hardware specs |
-| `GPU_QUANT_COMPAT` | ~Line 243 | GPU quantization support matrix |
-| `normalizePrec()` | ~Line 255 | Format → canonical name (priority matters!) |
-| `isPrecCompatible()` | ~Line 270 | Quant format compatibility check |
-| `getGPUVRAM()` | ~Line 279 | Must be EXACTLY ONE instance |
-| `MODELS_DATA` | ~Line 286 | 108 models, each with weight-only VRAM |
-| `modelFitsGPU()` | ~Line 405 | Dual check: VRAM + quant compatibility |
-| `filterModels()` | ~Line 426 | Applies all filters and sorts |
-| `getQuantBadgeClass()` | ~Line 467 | Badge CSS only (not for compatibility logic) |
-| `renderModels()` | ~Line 498 | Renders model cards grid |
-| `updateStats()` | ~Line 599 | Updates stats cards |
-| `openModal()` | ~Line 613 | Model detail modal |
-| `openGPUInfoModal()` | ~Line 726 | GPU compatibility info modal |
-
----
-
-## Reference Sources
-
-| Resource | URL | Used For |
-|----------|-----|----------|
-| vLLM Recipes List | https://recipes.vllm.ai/models.json | Model inventory |
-| vLLM Model Recipe | https://recipes.vllm.ai/{Provider}/{Model}.json | Per-model VRAM/variant data |
-| vLLM Quantization Docs | https://docs.vllm.ai/en/stable/features/quantization/ | Hardware compatibility matrix |
-| vLLM Quantization API | https://docs.vllm.ai/en/v0.19.1/api/vllm/model_executor/layers/quantization/ | Per-method implementation details |
-| NVIDIA GPU Specs | https://www.nvidia.com/en-us/ | Tensor core capabilities |
-| HuggingFace Models | https://huggingface.co/models | contextLength from config.json |
-| NVIDIA Tensor Core Guide | https://www.nvidia.com/en-us/data-center/tensor-core/ | Native HW format support by architecture |
-
-## Key Principles for Data Accuracy
-
-- `GPU_QUANT_COMPAT` lists all formats a GPU can run (native + software). Only completely unsupported formats are excluded.
-- `normalizePrec()` maps variant strings (like "GPTQ-Int4", "NVFP4-QAD", "W4A16") to 6 canonical format categories: BF16, FP8, INT4, NVFP4, MXFP4, MXFP8.
-- "Blackwell only" on variant notes is a human hint; the actual enforcement is through `isPrecCompatible()` checking the GPU's format list.
-- Legacy `gpuFeasibility` field on models is unused programmatically — VRAM + quant compatibility are computed at runtime by `modelFitsGPU()`.
-- Context length should be sourced from HuggingFace config.json `max_position_embeddings` (or `model_max_length` / `rope_scaling` as fallback).
+If a change makes KV *smaller*, be suspicious: under-counting makes a model claim to fit
+when it won't, which is the harmful direction. Over-counting merely hides a usable model.

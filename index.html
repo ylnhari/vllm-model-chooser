@@ -75,6 +75,16 @@
             border-radius: 4px;
             transition: width 0.5s ease;
         }
+        /* Stacked memory-budget bar: weights | KV | free. Drawn against the SELECTED
+           GPU count from the same fit result that decides the card's ✓/✗. */
+        .gpu-bar-seg { height: 100%; transition: width 0.4s ease; }
+        .seg-weights { background: var(--success); }
+        .seg-kv      { background: #6366f1; }
+        .seg-over    { background: var(--danger); }
+        .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+        .dot-weights { background: var(--success); }
+        .dot-kv      { background: #6366f1; }
+        .dot-over    { background: var(--danger); }
         .verdict-yes { background: var(--success); }
         .verdict-warning { background: var(--warning); }
         .verdict-no { background: var(--danger); }
@@ -196,13 +206,37 @@
                     </select>
                 </div>
                 <div class="flex items-center gap-2">
-                    <span class="text-sm text-[#8888a0] font-medium" title="Adds an estimated FP16 KV-cache footprint to the weight VRAM when checking fit. Computed from each model's attention geometry (layers × KV-heads × head-dim) where available; a coarse params×tokens proxy for models whose geometry couldn't be fetched.">KV est:</span>
+                    <span class="text-sm text-[#8888a0] font-medium" title="Adds an estimated KV-cache footprint to the weight VRAM when checking fit. Computed from each model's real attention geometry in its HuggingFace config.json: KV = full-attention layers x tokens + sliding-window layers x min(tokens, window).">KV est:</span>
                     <select id="kvContextSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
                         <option value="0">Off</option>
                         <option value="8192">8K ctx</option>
                         <option value="32768">32K ctx</option>
                         <option value="131072">128K ctx</option>
                         <option value="1048576">1M ctx</option>
+                    </select>
+                    <select id="kvDtypeSelect" onchange="filterModels()" title="vLLM's --kv-cache-dtype. FP8 KV halves the cache footprint." class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="fp16">FP16 KV</option>
+                        <option value="fp8">FP8 KV</option>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-[#8888a0] font-medium" title="vLLM's --gpu-memory-utilization: the fraction of each GPU vLLM may use for weights + KV + activations. vLLM's own default is 0.90-0.92; 0.95 is the optimistic end.">Mem util:</span>
+                    <select id="memUtilSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="0.85">0.85</option>
+                        <option value="0.90">0.90 (vLLM default)</option>
+                        <option value="0.92">0.92</option>
+                        <option value="0.95" selected>0.95</option>
+                        <option value="0.98">0.98</option>
+                    </select>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-[#8888a0] font-medium" title="ASSUMPTION, not a measurement. Per-GPU headroom for activations and CUDA graphs. vLLM does not compute this - it profiles a real forward pass at startup to measure it, and it scales with --max-num-batched-tokens. Adjust or zero it to taste.">Reserve<span class="text-[#f59e0b]">*</span>:</span>
+                    <select id="reserveSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
+                        <option value="0">0 GB/GPU</option>
+                        <option value="1">1 GB/GPU</option>
+                        <option value="2" selected>2 GB/GPU</option>
+                        <option value="4">4 GB/GPU</option>
+                        <option value="8">8 GB/GPU</option>
                     </select>
                 </div>
                 <button onclick="resetFilters()" class="filter-btn px-3 py-1.5 rounded-lg text-sm" title="Reset all filters to defaults">Reset</button>
@@ -215,10 +249,20 @@
                         <option value="vram">VRAM</option>
                         <option value="contextLength">Context Length</option>
                         <option value="name">Name</option>
-                        <option value="mmlu">MMLU Score</option>
-                        <option value="humaneval">HumanEval Score</option>
                     </select>
                 </div>
+            </div>
+
+            <!-- What is / isn't measured. Every number this tool shows is either read from a
+                 source (recipes / HF config / datasheet) or computed from one; the markers say which. -->
+            <div class="text-xs text-[#666680] mb-6 flex flex-wrap gap-x-5 gap-y-1 items-center">
+                <span class="text-[#8888a0] font-medium">Estimate markers:</span>
+                <span><strong class="text-[#8888a0]">~ / ≈</strong> estimated, not measured</span>
+                <span><strong class="text-[#8888a0]">°</strong> KV geometry from a same-arch mirror (repo is gated)</span>
+                <span><strong class="text-[#8888a0]">†</strong> KV geometry hand-sourced (no config available)</span>
+                <span><strong class="text-[#8888a0]">‡</strong> coarse params×tokens proxy (no geometry)</span>
+                <span><strong class="text-[#f59e0b]">*</strong> activation reserve is an assumption</span>
+                <span><strong class="text-[#8888a0]">✓*</strong> loads via vLLM software path (no speedup)</span>
             </div>
 
             <!-- Models Grid -->
