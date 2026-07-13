@@ -191,10 +191,10 @@ test('estKVCacheGB: uses exact attention geometry (kvBytesPerToken) when present
   assert.equal(estKVCacheGB(m, 0), 0);
 });
 
-test('data: kvBytesPerToken, when present, is a positive number', () => {
+test('data: kvBytesPerToken, when present, is a non-negative integer (0 = no KV cache)', () => {
   for (const m of MODELS_DATA) {
     if (m.kvBytesPerToken == null) continue;
-    assert.ok(typeof m.kvBytesPerToken === 'number' && m.kvBytesPerToken > 0, `${m.name} kvBytesPerToken`);
+    assert.ok(Number.isInteger(m.kvBytesPerToken) && m.kvBytesPerToken >= 0, `${m.name} kvBytesPerToken`);
   }
 });
 

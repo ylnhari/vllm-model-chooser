@@ -98,8 +98,9 @@ function emit(models) {
       `benchmark: ${bench}`,
       `hf_url: ${JSON.stringify(m.hf_url)}`,
     ];
-    // Weight-only-KV footprint per token (bytes, FP16), from HF attention geometry.
-    if (m.kvBytesPerToken) fields.push(`kvBytesPerToken: ${m.kvBytesPerToken}`);
+    // KV footprint per token (bytes, FP16) from HF attention geometry; 0 = no
+    // autoregressive KV cache (diffusion/generative). Absent = geometry unavailable.
+    if (m.kvBytesPerToken != null) fields.push(`kvBytesPerToken: ${m.kvBytesPerToken}`);
     // recipe_id is set only when the recipe path casing differs from hf_url
     // (e.g. HuggingFace "google/..." vs recipe "Google/..."); the recipe link
     // is case-sensitive, the HuggingFace link uses hf_url.
@@ -155,36 +156,106 @@ function pureWeightVram(totalParams, prec) {
 // Returns null when geometry is unavailable (gated repo / missing fields) so the
 // app falls back to its coarse params-based proxy. VL/multimodal configs nest the
 // text stack under text_config/language_config/llm_config — unwrap that first.
-function kvBytesPerTokenFromConfig(rawCfg) {
-  const c = (rawCfg && (rawCfg.text_config || rawCfg.language_config || rawCfg.llm_config)) || rawCfg || {};
-  const layersAll = c.num_hidden_layers ?? c.num_layers;
-  if (!layersAll) return null;
-  let layers = layersAll;
-  if (Array.isArray(c.layer_types)) {
-    const full = c.layer_types.filter(t => String(t).includes('full')).length;
-    if (full > 0) layers = full;                 // hybrid: linear-attn layers hold no KV cache
+// Descend through nested wrapper configs (multimodal/omni models bury the text
+// decoder under text_config / thinker_config / …) to the block carrying attention geometry.
+function descendToAttn(cfg) {
+  const WRAP = ['text_config', 'language_config', 'llm_config', 'thinker_config', 'decoder', 'llm'];
+  let c = cfg || {};
+  for (let i = 0; i < 5; i++) {
+    const geom = c && (c.num_hidden_layers || c.n_layers || c.hybrid_override_pattern) && (c.num_attention_heads || c.n_heads);
+    if (geom) return c;
+    let next = null;
+    for (const k of WRAP) { if (c && typeof c[k] === 'object' && c[k]) { next = c[k]; break; } }
+    if (!next) break;
+    c = next;
   }
-  // MLA (DeepSeek-style): the cache is a single compressed latent (kv_lora_rank) plus
-  // the rope key per token per layer — NOT num_heads × head_dim, and NOT doubled for
-  // K/V (the latent is shared). Using the GQA formula here overcounts ~20×.
+  return c;
+}
+
+function kvBytesPerTokenFromConfig(rawCfg) {
+  const c = descendToAttn(rawCfg);
+  if (!c) return null;
+  // Layer count: for Mamba/attention hybrids (Nemotron-H) the KV-bearing layers are
+  // the '*' entries of hybrid_override_pattern; else count full_attention layer_types;
+  // else num_hidden_layers / n_layers (Mistral params.json).
+  let layers = null;
+  if (typeof c.hybrid_override_pattern === 'string') {
+    const attn = (c.hybrid_override_pattern.match(/\*/g) || []).length;
+    if (attn > 0) layers = attn;
+  }
+  if (layers == null && Array.isArray(c.layers_block_type)) {          // Nemotron-H hybrid
+    const attn = c.layers_block_type.filter(t => String(t).toLowerCase().includes('attention')).length;
+    if (attn > 0) layers = attn;
+  }
+  if (layers == null && Array.isArray(c.layer_types)) {
+    const full = c.layer_types.filter(t => String(t).includes('full')).length;
+    if (full > 0) layers = full;
+  }
+  if (layers == null) layers = c.num_hidden_layers ?? c.n_layers;
+  if (!layers) return null;
+  // MLA (DeepSeek): a single compressed latent (kv_lora_rank) + rope key per token per
+  // layer — NOT num_heads × head_dim, NOT doubled for K/V. GQA formula overcounts ~20×.
   if (c.kv_lora_rank) {
     return Math.round(layers * (c.kv_lora_rank + (c.qk_rope_head_dim || 0)) * 2);
   }
   // GQA / MHA: separate K and V, each num_kv_heads × head_dim, FP16.
-  const nHeads = c.num_attention_heads;
-  const kvHeads = c.num_key_value_heads ?? nHeads;
-  let headDim = c.head_dim;
-  if (!headDim && c.hidden_size && nHeads) headDim = c.hidden_size / nHeads;
+  const nHeads = c.num_attention_heads ?? c.n_heads;
+  const kvHeads = c.num_key_value_heads ?? c.n_kv_heads ?? nHeads;
+  let headDim = c.head_dim ?? c.attention_head_dim;
+  if (!headDim && (c.hidden_size || c.dim) && nHeads) headDim = (c.hidden_size || c.dim) / nHeads;
   if (!kvHeads || !headDim) return null;
   return Math.round(layers * 2 * kvHeads * headDim * 2);
 }
 
+// Some HF configs embed non-JSON literals (Infinity / NaN in rope-scaling fields).
+function tolerantJson(text) {
+  try { return JSON.parse(text); }
+  catch { return JSON.parse(text.replace(/-?\bInfinity\b/g, '1e309').replace(/\bNaN\b/g, 'null')); }
+}
+
+// Ungated config mirrors for gated repos (HF 401): identical architecture, public
+// config — lets the KV sync fetch REAL geometry instead of guessing. Verified same-arch.
+const HF_CONFIG_MIRROR = {
+  'meta-llama/Llama-3.1-8B-Instruct': 'unsloth/Meta-Llama-3.1-8B-Instruct',
+  'meta-llama/Llama-3.3-70B-Instruct': 'unsloth/Llama-3.3-70B-Instruct',
+  'meta-llama/Llama-4-Scout-17B-16E-Instruct': 'unsloth/Llama-4-Scout-17B-16E-Instruct',
+  'google/translategemma-27b-it': 'unsloth/gemma-3-27b-it',   // translategemma = Gemma-3-27B backbone
+  'zai-org/GLM-GA': 'zai-org/GLM-4-9B-0414',                  // GLM-GA = GLM-4 9B family
+};
+
+// Explicit KV overrides for models with no fetchable config AND no mirror.
+//   0  → NO autoregressive KV cache (diffusion/image/video/audio generators, single-pass).
+//   { layers, kvHeads, headDim } → hand-sourced GQA geometry (cited), computed like a config.
+const KV_GEOMETRY_OVERRIDES = {
+  'zai-org/GLM-Image': 0,
+  'meituan-longcat/LongCat-Image-Edit': 0,
+  'Qwen/Qwen-Image': 0,
+  'Wan-AI/Wan2.2-T2V-A14B-Diffusers': 0,
+  'stabilityai/stable-diffusion-3.5-medium': 0,
+  'stabilityai/stable-audio-open-1.0': 0,
+  // PLaMo-3 31B: gated, no public mirror. Estimated from a typical 31B dense GQA layout
+  // (48 layers, 8 KV heads, head_dim 128); refine if the config ever opens.
+  'pfnet/plamo-3-nict-31b-base': { layers: 48, kvHeads: 8, headDim: 128 },
+};
+
+async function fetchRepoKV(repo) {
+  const tryFile = async (file) => {
+    try { const r = await fetch(`https://huggingface.co/${repo}/resolve/main/${file}`);
+      return r.ok ? kvBytesPerTokenFromConfig(tolerantJson(await r.text())) : null;
+    } catch { return null; }
+  };
+  return (await tryFile('config.json')) ?? (await tryFile('params.json')) ?? null;
+}
+
 async function fetchConfigKV(hfUrl) {
-  try {
-    const res = await fetch(`https://huggingface.co/${hfUrl}/resolve/main/config.json`);
-    if (!res.ok) return null;                     // 401 gated / 404 → fall back to proxy
-    return kvBytesPerTokenFromConfig(await res.json());
-  } catch { return null; }
+  // 1) direct config.json / params.json → 2) ungated mirror repo → 3) explicit override.
+  let kv = await fetchRepoKV(hfUrl);
+  if (kv == null && HF_CONFIG_MIRROR[hfUrl]) kv = await fetchRepoKV(HF_CONFIG_MIRROR[hfUrl]);
+  if (kv == null && hfUrl in KV_GEOMETRY_OVERRIDES) {
+    const o = KV_GEOMETRY_OVERRIDES[hfUrl];
+    kv = (o === 0) ? 0 : Math.round(o.layers * 2 * o.kvHeads * o.headDim * 2);
+  }
+  return kv;
 }
 
 async function main() {
@@ -207,8 +278,7 @@ async function main() {
       else if ('recipe_id' in m) delete m.recipe_id;
       // KV-cache geometry from HuggingFace config.json (best-effort; null on gated/missing).
       const kv = await fetchConfigKV(m.hf_url);
-      if (kv && kv !== m.kvBytesPerToken) { changes.kv.push({ name: m.name, to: kv }); m.kvBytesPerToken = kv; }
-      else if (!kv && 'kvBytesPerToken' in m) { /* keep last-known geometry if config now unavailable */ }
+      if (kv != null && kv !== m.kvBytesPerToken) { changes.kv.push({ name: m.name, to: kv }); m.kvBytesPerToken = kv; }
 
       let j;
       try { j = await fetchJson(BASE + entry.json); } catch { continue; }

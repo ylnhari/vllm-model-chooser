@@ -106,16 +106,34 @@ to `#gpuTypeSelect` in `index.html`, regenerate, verify. The info-modal table an
 snapshot cards are data-driven and update themselves.
 
 ### Add a new ARCHITECTURE (KV-cache geometry)
-`kvBytesPerToken` is computed in `kvBytesPerTokenFromConfig()` (sync-data.mjs) from the
-HF `config.json`; the app multiplies it by context tokens for the KV estimate, falling
-back to a coarse params proxy when it's `null` (gated repos, no standard config).
-Current handling: **GQA/MHA** (`num_key_value_heads × head_dim`, ×2 for K/V, FP16),
-**MLA** (`kv_lora_rank + qk_rope_head_dim`, single latent — DeepSeek), and **hybrid
-linear/full** (`layer_types` → count only `full_attention` layers). If a new attention
-type caches KV differently (e.g. a linear/SSM scheme that doesn't expose `layer_types`,
-or a new latent-attention variant), add a branch there keyed on a distinctive config
-field or `model_type`, then re-sync and spot-check the `@128K` GB values look sane
-(dense-70B ≈ 40GB, MLA-671B ≈ 9GB, mostly-linear ≈ single-digit GB).
+`kvBytesPerToken` (bytes/token, FP16 KV) is computed by `kvBytesPerTokenFromConfig()`
+in sync-data.mjs from the HF `config.json`; the app multiplies it by context tokens.
+**Every model should carry a value** — `> 0` (real geometry), or `0` (no autoregressive
+KV cache: diffusion/image/video/audio generators). Absent means the app falls back to a
+coarse params proxy — treat that as a gap to close, not the norm.
+
+The generator resolves geometry through a fallback chain (`fetchConfigKV`):
+1. **Direct** `config.json`, then `params.json` (Mistral consolidated format).
+2. **Ungated mirror** (`HF_CONFIG_MIRROR`) — gated repos (HF 401, e.g. Meta Llama,
+   gated Gemma) map to a same-architecture public mirror so real geometry is *fetched,
+   not guessed*. Add `gated_id: mirror_id` here for new gated models.
+3. **Explicit override** (`KV_GEOMETRY_OVERRIDES`) — `0` for generative/no-KV models;
+   `{ layers, kvHeads, headDim }` for the rare gated model with no mirror (cite the
+   source; mark clearly if it's an estimate, as `plamo-3` is).
+
+Layer-count and attention-type handling already covered, keyed off config fields:
+- **layer count**: `hybrid_override_pattern` (count `*`) and `layers_block_type` (count
+  `*attention*`) for Mamba/attention hybrids (Nemotron-H); `layer_types` → count
+  `full_attention` for linear/full hybrids; else `num_hidden_layers`/`n_layers`.
+- **attention type**: MLA (`kv_lora_rank + qk_rope_head_dim`, single latent — DeepSeek);
+  GQA/MHA (`num_key_value_heads × head_dim`, ×2 K/V). `head_dim` falls back to
+  `attention_head_dim` or `hidden_size/num_attention_heads`.
+- **nesting**: `descendToAttn()` unwraps `text_config` / `thinker_config` / `decoder` /
+  … for multimodal/omni configs; `tolerantJson()` survives `Infinity`/`NaN` literals.
+
+For a genuinely new scheme (e.g. a linear/SSM type that hides its layout), add a branch
+keyed on a distinctive field or `model_type`, re-sync, and spot-check `@128K` GB looks
+sane: dense-70B ≈ 43GB, MLA-671B ≈ 9GB, Mamba-hybrid / mostly-linear ≈ single-digit GB.
 
 ---
 

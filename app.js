@@ -48,8 +48,9 @@ function getGPUVRAM(gpus) {
 const KV_GB_PER_PARAM_PER_TOKEN = 3.3e-6;   // GB per (B-params × token) — fallback proxy only
 function estKVCacheGB(model, tokens) {
     if (!tokens) return 0;
-    if (model.kvBytesPerToken) return model.kvBytesPerToken * tokens / 1e9;
-    return model.totalParams * tokens * KV_GB_PER_PARAM_PER_TOKEN;
+    // kvBytesPerToken present (incl. 0 for no-KV diffusion/generative models) → exact.
+    if (model.kvBytesPerToken != null) return model.kvBytesPerToken * tokens / 1e9;
+    return model.totalParams * tokens * KV_GB_PER_PARAM_PER_TOKEN;   // proxy fallback
 }
 // Selected context length (tokens) for the KV estimate; 0 = estimate off.
 function getKVContextTokens() {
@@ -328,7 +329,9 @@ function openModal(id) {
     
     const kvTokens = getKVContextTokens();
     const kvGB = estKVCacheGB(model, kvTokens);
-    const kvBasis = model.kvBytesPerToken
+    const kvBasis = model.kvBytesPerToken === 0
+        ? `no autoregressive KV cache — this is a single-pass diffusion/generative model, so context length adds no VRAM`
+        : model.kvBytesPerToken
         ? `FP16 KV from the model's attention geometry (full-attention layers × KV-heads × head-dim)`
         : `a rough params×tokens proxy — geometry wasn't available for this model, so it ignores GQA/MLA and over-estimates MoE`;
     const contextWarning = kvTokens
