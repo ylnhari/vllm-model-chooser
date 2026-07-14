@@ -121,10 +121,18 @@
                     <h1 class="text-2xl font-bold"><span class="gradient-text">vLLM Model Chooser</span></h1>
                     <p class="text-sm text-[#8888a0]">Find your perfect LLM for any GPU setup</p>
                 </div>
-                <button onclick="openGPUInfoModal()" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>
-                    GPU & Format Info
-                </button>
+                <div class="flex items-center gap-2">
+                    <!-- Jumps to the glossary at the foot of the page, so the legend stays
+                         discoverable without eating the space above the model cards. -->
+                    <a href="#glossary" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2" title="What do ~, °, †, ‡, * and ✓* mean on a card?">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        Symbols &amp; Estimates
+                    </a>
+                    <button onclick="openGPUInfoModal()" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"/></svg>
+                        GPU &amp; Format Info
+                    </button>
+                </div>
             </div>
         </nav>
 
@@ -253,21 +261,9 @@
                 </div>
             </div>
 
-            <!-- What is / isn't measured. Every number this tool shows is either read from a
-                 source (recipes / HF config / datasheet) or computed from one; the markers say which. -->
-            <div class="text-xs text-[#666680] mb-6 flex flex-wrap gap-x-5 gap-y-1 items-center">
-                <span class="text-[#8888a0] font-medium">Estimate markers:</span>
-                <span><strong class="text-[#8888a0]">~ / ≈</strong> estimated, not measured</span>
-                <span><strong class="text-[#8888a0]">°</strong> KV geometry from a same-arch mirror (repo is gated)</span>
-                <span><strong class="text-[#8888a0]">†</strong> KV geometry hand-sourced (no config available)</span>
-                <span><strong class="text-[#8888a0]">‡</strong> coarse params×tokens proxy (no geometry)</span>
-                <span><strong class="text-[#f59e0b]">*</strong> activation reserve is an assumption</span>
-                <span><strong class="text-[#8888a0]">✓*</strong> loads via vLLM software path (no speedup)</span>
-            </div>
-
             <!-- Models Grid -->
             <div id="modelsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
-            
+
             <!-- No Results -->
             <div id="noResults" class="hidden text-center py-20">
                 <div class="text-4xl mb-4">🔍</div>
@@ -275,6 +271,153 @@
                 <p class="text-[#8888a0]">Try adjusting your filters or search query</p>
             </div>
         </div>
+
+        <!-- Glossary. Every number this tool shows is either read from a source (recipes /
+             HF config / datasheet) or computed from one, and the symbols on a card say which.
+             It lives below the grid on purpose: the space above the cards is for choosing a
+             model, not for a legend you read once. The nav "Symbols" link jumps here. -->
+        <section id="glossary" class="border-t border-[#2a2a3a] bg-[#0c0c12] scroll-mt-24">
+            <div class="max-w-7xl mx-auto px-6 py-14">
+                <h2 class="text-2xl font-bold mb-2"><span class="gradient-text">Reading the cards: what every symbol means</span></h2>
+                <p class="text-[#8888a0] max-w-3xl mb-8">
+                    This tool never shows a number without saying how confident it is. A figure with no symbol
+                    next to it was computed from the model's own published config; a figure with a symbol was
+                    computed from something less direct, and the symbol tells you exactly what.
+                </p>
+
+                <h3 class="text-sm font-semibold uppercase tracking-wide text-[#8888a0] mb-4">Confidence markers</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-10">
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-1">~ ≈</div>
+                        <div>
+                            <div class="font-semibold mb-1">Estimated, not measured</div>
+                            <p class="text-sm text-[#8888a0]">
+                                Every VRAM and KV-cache figure here is arithmetic — parameter count × bytes per
+                                parameter, attention geometry × tokens — not a reading from a real vLLM process.
+                                Use them to shortlist hardware, then confirm by actually starting the server.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-1">°</div>
+                        <div>
+                            <div class="font-semibold mb-1">KV geometry from a same-architecture mirror</div>
+                            <p class="text-sm text-[#8888a0]">
+                                The model's own HuggingFace repo is gated, so its attention geometry (layers, KV
+                                heads, head dim, sliding window) was read from an ungated repo of the same
+                                architecture. Almost always right — but it is a stand-in, not the model's own file.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-1">†</div>
+                        <div>
+                            <div class="font-semibold mb-1">KV geometry hand-sourced</div>
+                            <p class="text-sm text-[#8888a0]">
+                                No <code>config.json</code> was reachable anywhere — gated repo, no mirror. The
+                                geometry was entered by hand from the model card or paper. Treat the KV number as
+                                a rough guide and verify before you size hardware around it.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-1">‡</div>
+                        <div>
+                            <div class="font-semibold mb-1">Coarse params × tokens proxy</div>
+                            <p class="text-sm text-[#8888a0]">
+                                The weakest number on the site. With no attention geometry at all, the KV cache is
+                                approximated straight from parameter count and context length. It ignores GQA and
+                                MLA (which shrink the cache a lot) and over-estimates MoE models, so it usually
+                                reads <em>too high</em>. Don't rule a model out on this figure alone.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#f59e0b] w-16 shrink-0 text-center leading-none pt-1">*</div>
+                        <div>
+                            <div class="font-semibold mb-1">The activation reserve is an assumption</div>
+                            <p class="text-sm text-[#8888a0]">
+                                The per-GPU headroom set aside for activations and CUDA graphs (the
+                                <strong>Reserve</strong> control in the filter bar) is a guess, not a
+                                calculation. vLLM <em>measures</em> it at startup by profiling a real forward pass,
+                                so it shifts with batch size, sequence length and model. Raise it to be safe,
+                                lower it to see what a tighter server would fit.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-1">✓*</div>
+                        <div>
+                            <div class="font-semibold mb-1">Fits, but via vLLM's software path</div>
+                            <p class="text-sm text-[#8888a0]">
+                                The quantized weights load and run on this GPU, but the GPU has no tensor cores for
+                                that format — vLLM dequantizes on the fly (e.g. INT4/AWQ via Marlin). You get the
+                                <strong>memory saving</strong>, not a speedup, and throughput can be worse than a
+                                natively-supported format. A plain <span class="text-[#22c55e] font-semibold">✓</span>
+                                means native hardware support.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <h3 class="text-sm font-semibold uppercase tracking-wide text-[#8888a0] mb-4">Fit verdicts &amp; card notes</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold w-16 shrink-0 text-center leading-none pt-1"><span class="text-[#22c55e]">✓</span> <span class="text-[#ef4444]">✗</span></div>
+                        <div>
+                            <div class="font-semibold mb-1">Does it fit on N GPUs?</div>
+                            <p class="text-sm text-[#8888a0]">
+                                <span class="text-[#22c55e] font-semibold">✓</span> = model weights (plus the KV cache,
+                                if you switched the KV estimate on) sit inside the usable budget: physical VRAM ×
+                                memory utilization − activation reserve. <span class="text-[#ef4444] font-semibold">✗</span>
+                                = too large, or the quantization format isn't supported on that GPU at all. Hover any
+                                verdict for the arithmetic behind it.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#6366f1] w-16 shrink-0 text-center leading-none pt-1">▬</div>
+                        <div>
+                            <div class="font-semibold mb-1">The memory bar</div>
+                            <p class="text-sm text-[#8888a0]">
+                                A card's bar splits the selected GPUs' usable memory into
+                                <span class="text-[#22c55e] font-medium">weights</span>,
+                                <span class="text-[#818cf8] font-medium">KV cache</span> and free space —
+                                <span class="text-[#ef4444] font-medium">red</span> when it overflows. It is drawn from
+                                the same fit result that decides the ✓/✗, so the bar and the verdict can never disagree.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-2">SWA</div>
+                        <div>
+                            <div class="font-semibold mb-1">Sliding-window attention</div>
+                            <p class="text-sm text-[#8888a0]">
+                                Some or all of the model's layers cap their KV cache at a fixed window instead of
+                                growing with the full context, so its KV stays far smaller than a full-attention model
+                                of the same size. A surprisingly small KV number on an SWA model is the design, not a bug.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-xl font-bold text-[#8888a0] w-16 shrink-0 text-center leading-none pt-2">0 KV</div>
+                        <div>
+                            <div class="font-semibold mb-1">No KV cache (single-pass)</div>
+                            <p class="text-sm text-[#8888a0]">
+                                Diffusion-style and other single-pass models have no autoregressive KV cache at all —
+                                context length costs them no extra VRAM. Their KV row reads zero on purpose.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <p class="text-xs text-[#666680] mt-8 max-w-3xl">
+                    Want the hardware side — which quantization formats run natively on which GPU, and how the memory
+                    budget is derived? Open
+                    <button onclick="openGPUInfoModal()" class="text-[#818cf8] hover:underline">GPU &amp; Format Info</button>.
+                </p>
+            </div>
+        </section>
     </div>
 
     <!-- Modal -->
