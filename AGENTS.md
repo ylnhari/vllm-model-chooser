@@ -251,3 +251,25 @@ KV sliding-window capping, the tri-state compat map, and the absence of unsource
 
 If a change makes KV *smaller*, be suspicious: under-counting makes a model claim to fit
 when it won't, which is the harmful direction. Over-counting merely hides a usable model.
+
+---
+
+## Living artifacts
+
+**Re-check weekly; refresh on drift.**
+
+The model dataset is generated from the upstream catalogue, but several numbers
+*describing* it are hand-typed and do not move when the data does:
+
+| Artifact | What goes stale | Source of truth |
+|---|---|---|
+| `README.md` — model-count badge, feature bullets, GPU-type list, "only N/M expose eval metrics" | Every one of these is a hand-typed snapshot of the generated dataset; a sync changes the data and leaves the prose behind | The generated data file — count it, don't recall it |
+
+Rules:
+- After any data sync, re-derive each count from the data file itself rather than
+  editing the number you expected. Publishing a wrong count is worse than
+  publishing none, because it reads as a verified spec.
+- The portfolio site quotes the model count too. Refresh both together or
+  neither — a public disagreement between them is the failure mode.
+- Better than either: have the sync emit these counts so they cannot drift. Until
+  that exists, this table is the manual fallback.
