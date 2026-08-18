@@ -3,7 +3,7 @@
 // (kv* fields). Curated fields (type) are preserved across syncs. Weight-only vram
 // is COMPUTED (totalParams x bytes-per-param) for pure precisions; mixed-precision
 // values (MXFP4/compound like gpt-oss, "FP4+FP8", "AMD-FP8") stay curated.
-// Last sync: 2026-07-13.
+// Last sync: 2026-08-18.
 //
 // SOURCES OF TRUTH (see README "Data Sources" / AGENTS.md):
 //   model specs (params, context, arch) ........ recipes.vllm.ai/<id>.json -> .model.*
@@ -146,7 +146,7 @@ const MODELS_DATA = [
     { id: 43, name: "Qwen3.5-27B", provider: "Qwen", params: "27B", totalParams: 27, activeParams: 27, prec: "BF16", vram: 54, variants: [{prec: "FP8", vram: 27}, {prec: "GPTQ-Int4", vram: 14}], type: "text", contextLength: 262144, hf_url: "Qwen/Qwen3.5-27B", kvBytesPerToken: 65536, kvSource: "config" },
     { id: 44, name: "Qwen3.5-35B-A3B", provider: "Qwen", params: "35B/3B", totalParams: 35, activeParams: 3, prec: "BF16", vram: 70, variants: [{prec: "FP8", vram: 35}, {prec: "GPTQ-Int4", vram: 18}], type: "moe", contextLength: 262144, hf_url: "Qwen/Qwen3.5-35B-A3B", kvBytesPerToken: 20480, kvSource: "config" },
     { id: 46, name: "MiniMax-M2.5", provider: "MiniMaxAI", params: "230B/10B", totalParams: 230, activeParams: 10, prec: "FP8", vram: 230, variants: [{prec: "NVFP4", vram: 115, note: "Blackwell only"}], type: "moe", contextLength: 196608, hf_url: "MiniMaxAI/MiniMax-M2.5", kvBytesPerToken: 253952, kvSource: "config" },
-    { id: 47, name: "GLM-5.2", provider: "zai-org", params: "743B/39B", totalParams: 743, activeParams: 39, prec: "FP8", vram: 743, variants: [{prec: "BF16", vram: 1486}, {prec: "NVFP4", vram: 372, note: "synced from vLLM recipe"}], type: "moe", contextLength: 1048576, hf_url: "zai-org/GLM-5.2", kvBytesPerToken: 89856, kvSource: "config" },
+    { id: 47, name: "GLM-5.2", provider: "zai-org", params: "743B/39B", totalParams: 743, activeParams: 39, prec: "FP8", vram: 743, variants: [{prec: "BF16", vram: 1486}, {prec: "NVFP4", vram: 372, note: "synced from vLLM recipe"}, {prec: "MXFP4", vram: 372, note: "synced from vLLM recipe"}], type: "moe", contextLength: 1048576, hf_url: "zai-org/GLM-5.2", kvBytesPerToken: 89856, kvSource: "config" },
     { id: 48, name: "GLM-5", provider: "zai-org", params: "744B/40B", totalParams: 744, activeParams: 40, prec: "BF16", vram: 1488, variants: [{prec: "FP8", vram: 744, note: "synced from vLLM recipe"}, {prec: "NVFP4", vram: 372, note: "synced from vLLM recipe"}], type: "moe", contextLength: 202752, hf_url: "zai-org/GLM-5", kvBytesPerToken: 89856, kvSource: "config" },
     { id: 49, name: "GLM-OCR", provider: "zai-org", params: "0.9B", totalParams: 0.9, activeParams: 0.9, prec: "BF16", vram: 2, variants: [], type: "embedding", contextLength: 131072, hf_url: "zai-org/GLM-OCR", kvBytesPerToken: 65536, kvSource: "config" },
     { id: 50, name: "PaddleOCR-VL-1.5", provider: "PaddlePaddle", params: "0.9B", totalParams: 0.9, activeParams: 0.9, prec: "BF16", vram: 2, variants: [], type: "embedding", contextLength: 131072, hf_url: "PaddlePaddle/PaddleOCR-VL-1.5", kvBytesPerToken: 18432, kvSource: "config" },
@@ -220,5 +220,5 @@ const MODELS_DATA = [
     { id: 140, name: "Step-3.5-Flash", provider: "stepfun-ai", params: "196B/11B", totalParams: 196, activeParams: 11, prec: "BF16", vram: 392, variants: [{prec: "FP8", vram: 196}, {prec: "INT4", vram: 98}, {prec: "INT8", vram: 196, note: "synced from vLLM recipe"}], type: "moe", contextLength: 262144, hf_url: "stepfun-ai/Step-3.5-Flash", kvBytesPerToken: 393216, kvSlidingBytesPerToken: 1179648, kvWindow: 512, kvSource: "config" },
     { id: 141, name: "Kimi-K2-Instruct", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "FP8", vram: 1000, variants: [], type: "moe", contextLength: 131072, hf_url: "moonshotai/Kimi-K2-Instruct", kvBytesPerToken: 70272, kvSource: "config" },
     { id: 142, name: "Kimi-K2-Thinking", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "INT4", vram: 500, variants: [{prec: "NVFP4", vram: 500, note: "Blackwell only"}], type: "moe", contextLength: 262144, hf_url: "moonshotai/Kimi-K2-Thinking", kvBytesPerToken: 70272, kvSource: "config" },
-    { id: 143, name: "Kimi-K2.5", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "INT4", vram: 500, variants: [{prec: "NVFP4", vram: 500, note: "Blackwell only"}], type: "vision", contextLength: 262144, hf_url: "moonshotai/Kimi-K2.5", kvBytesPerToken: 70272, kvSource: "config" },
+    { id: 143, name: "Kimi-K2.5", provider: "moonshotai", params: "1T/32B", totalParams: 1000, activeParams: 32, prec: "INT4", vram: 500, variants: [{prec: "NVFP4", vram: 500, note: "Blackwell only"}, {prec: "MXFP4", vram: 500, note: "synced from vLLM recipe"}], type: "vision", contextLength: 262144, hf_url: "moonshotai/Kimi-K2.5", kvBytesPerToken: 70272, kvSource: "config" },
 ];
