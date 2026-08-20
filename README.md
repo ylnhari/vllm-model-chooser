@@ -3,7 +3,7 @@
 [![Live Demo](https://img.shields.io/badge/demo-live-brightgreen?style=flat-square)](https://ylnhari.github.io/vllm-model-chooser)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![vLLM](https://img.shields.io/badge/vLLM-compatible-6366f1?style=flat-square)](https://docs.vllm.ai)
-[![Models](https://img.shields.io/badge/models-108-success?style=flat-square)](index.html)
+[![Models](https://img.shields.io/badge/models-115-success?style=flat-square)](index.html)
 [![GitHub Pages](https://img.shields.io/badge/hosted-GitHub%20Pages-222?style=flat-square)](https://ylnhari.github.io/vllm-model-chooser)
 
 Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. Select your GPU, filter by context length and quantization, and instantly see which models fit.
@@ -18,13 +18,13 @@ Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. 
 - **Real KV-cache geometry**: computed per model from its HuggingFace `config.json` — including MLA (DeepSeek) and **sliding-window attention**, where only some layers cache the full context and the rest are capped at the window. Selectable FP16/FP8 KV dtype.
 - **Worst-case concurrency**: how many full-context requests fit in the KV pool left after weights
 - **Shareable URLs**: filter state (including util / reserve / KV dtype) is reflected into query params
-- **108 models**: params, weight-only VRAM, context length, quantization variants, KV geometry
+- **115 models**: params, weight-only VRAM, context length, quantization variants, KV geometry
 - **GPU compatibility info modal**: Native HW vs vLLM SW support per format, GPU specs + memory-budget table, quantization compatibility matrix
 - **vLLM Recipe & HuggingFace links** per model
 
 ### What this tool deliberately does *not* show
 
-**Benchmark scores.** They were removed, not hidden. Only **2 of 108** models expose structured eval metrics on HuggingFace (`cardData.model-index`), and even those aren't comparable (`pass@1`/`acc`/`exact_match` on unnamed tasks); the Open LLM Leaderboard is archived and doesn't cover these models. The previous MMLU/HumanEval numbers were hand-curated with **no verifiable source** — and were rendered as confident bars *and* used as a sort key. Unsourced scores driving a model-selection decision are worse than no scores. A test now guards against them creeping back in.
+**Benchmark scores.** They were removed, not hidden. Only **2 of 115** models expose structured eval metrics on HuggingFace (`cardData.model-index`), and even those aren't comparable (`pass@1`/`acc`/`exact_match` on unnamed tasks); the Open LLM Leaderboard is archived and doesn't cover these models. The previous MMLU/HumanEval numbers were hand-curated with **no verifiable source** — and were rendered as confident bars *and* used as a sort key. Unsourced scores driving a model-selection decision are worse than no scores. A test now guards against them creeping back in.
 
 ## Quick Start
 
@@ -141,7 +141,7 @@ All factual data is derived from the sources below. **Trust these sources, in th
 | **Memory budget** (util, reserve) | [vLLM engine args](https://docs.vllm.ai/en/latest/configuration/engine_args.html) | `budget = physical × --gpu-memory-utilization`; KV is allocated greedily into what's left after weights + activations. Both are runtime user controls. The activation reserve is an **assumption** — vLLM *measures* it by profiling at startup. |
 | **Weight-only VRAM** (our `vram` field) | computed, not copied | `totalParams × bytesPerParam` — BF16 ×2, FP8/MXFP8/INT8 ×1, INT4/NVFP4/MXFP4/W4A16 ×0.5. Recipe `vram_minimum_gb` includes KV cache, so don't use it directly. Mixed-precision (MXFP4/`FP4+FP8`/`AMD-FP8`) stays curated — the naive formula understates it. Real checkpoints run a few % larger (quant scales, unquantized embeddings/lm_head). |
 | **KV-cache geometry** (`kvBytesPerToken`, `kvSlidingBytesPerToken`, `kvWindow`, `kvSource`) | HuggingFace `config.json` | Per attention layer: `2 × num_kv_heads × head_dim × 2B` (GQA/MHA) or `(kv_lora_rank + qk_rope_head_dim) × 2B` (MLA — a single compressed latent, **not** ×heads, **not** ×2). Layers are then split into full-attention vs sliding-window (`layer_types`, or `sliding_window` + `sliding_window_pattern`); Mamba/linear layers cache nothing and are excluded. See `kvBytesPerTokenFromConfig` in the generator. |
-| **Benchmarks** | ❌ **none — deliberately removed** | Only 2/108 models expose structured eval metrics on HF, and they aren't comparable. There is no authoritative source, so the tool shows no scores rather than unsourced ones. Do not re-add hand-curated numbers; a test blocks it. |
+| **Benchmarks** | ❌ **none — deliberately removed** | Only 2/115 models expose structured eval metrics on HF, and they aren't comparable. There is no authoritative source, so the tool shows no scores rather than unsourced ones. Do not re-add hand-curated numbers; a test blocks it. |
 
 ### Keeping data correct
 - `node scripts/sync-data.mjs` — rebuilds `data.js` from recipes (context length, variant precisions, `recipe_id` casing), preserving curated fields.
