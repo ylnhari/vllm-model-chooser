@@ -16,7 +16,7 @@ Static, no-build web application that helps users select vLLM-compatible LLM mod
 
 **`GPU_QUANT_COMPAT` is a tri-state map**, not an array: `{ CANONICAL: 'native' | 'sw' }` — present key = supported (`native` = HW tensor cores, `sw` = vLLM software path), absent = unsupported. `precSupportLevel(prec, gpuType)` returns `'native' | 'sw' | null`; `isPrecCompatible` is just `precSupportLevel(...) !== null`.
 
-**`GPU_CONFIG` carries physical VRAM only** — no `usableVram`. The usable budget is derived at runtime (`physical × util − activation reserve`), both of which are user controls mirroring vLLM's `--gpu-memory-utilization`. See "The memory budget" below.
+**`GPU_CONFIG` carries physical VRAM only** — no `usableVram`. The budget is derived at runtime (`physical × util`), where util is a user control mirroring vLLM's `--gpu-memory-utilization`. See "The memory budget" below.
 
 **Critical**: `vram` in `MODELS_DATA` is **weight-only**. KV cache is never folded into it — it's computed separately from each model's real HF attention geometry (`estKVCacheGB`), including sliding-window layers, and the user toggles it into the fit check.
 
@@ -116,17 +116,20 @@ data-driven and update themselves.
 The app mirrors vLLM's own accounting:
 
 ```
-budget        = physical × gpu-memory-utilization   # #memUtilSelect, default 0.95
-weights + KV  = budget − activation reserve         # #reserveSelect, default 2 GB/GPU
-KV pool       = (weights + KV) − weights            # vLLM fills this greedily
+budget        = physical × gpu-memory-utilization   # #memUtilSelect, default 0.92 (vLLM's own)
+KV pool       ≤ budget − weights                    # vLLM fills this greedily
 ```
 
-`getGPUVRAM(gpus)` is the single source of truth for the capacity check. The **activation
-reserve is an assumption, and must stay visibly labelled as one** — vLLM does not compute
-it, it *measures* it by profiling a forward pass at startup, and it scales with
-`--max-num-batched-tokens`. Never bury it in a constant; it's a user control (settable to 0)
-and carries a `*` marker in the UI. Same principle for the util default (0.95 is more
-optimistic than vLLM's own 0.90–0.92 — so the user gets to choose).
+`getGPUVRAM(gpus)` is the single source of truth for the capacity check. `--gpu-memory-utilization`
+is the ceiling for the **whole** vLLM instance — weights, activations, CUDA graphs and KV
+(`vllm/v1/worker/gpu_worker.py`, `determine_available_memory`). Before sizing the KV cache vLLM
+subtracts the activation/CUDA-graph peak it *measures* at startup by profiling a dummy forward
+pass; that scales with `--max-num-batched-tokens` and hidden size and ranges from <0.1 GiB to
+>30 GiB in real logs. **Do not model it with a constant.** A flat per-GPU "activation reserve"
+control existed and was removed: a number with no source violates invariant 6 below. The KV pool
+is labelled an upper bound (`≤`) instead. If a per-model estimate is ever wanted, source it —
+add `hidden_size`/`intermediate_size` to the generator's HF-config read and derive it from
+those plus a batched-tokens input; never reintroduce a bare constant.
 
 ### Add a new ARCHITECTURE (KV-cache geometry)
 KV is **not** a single bytes-per-token constant. The app computes:
@@ -216,7 +219,7 @@ marked unsupported on A100 when the recipes explicitly run gpt-oss on one).
 2. **`vram` is weight-only.** Never fold KV cache into it. Recipe `vram_minimum_gb` is
    KV-inclusive — do not copy it into our `vram` field.
 3. **One `getGPUVRAM`.** It is the single source of truth for capacity
-   (`physical × util − reserve`). Never add a second definition or a hardcoded fallback.
+   (`physical × util`). Never add a second definition or a hardcoded fallback.
 4. **Dual check.** `modelFitsGPU` must gate on BOTH capacity AND `precSupportLevel`.
    It returns the numbers the UI draws (`weights`/`kv`/`usable`) so the card's bar and its
    ✓/✗ are physically incapable of disagreeing — they used to, badly.
@@ -224,7 +227,7 @@ marked unsupported on A100 when the recipes explicitly run gpt-oss on one).
    the FP4 family before `FP8`, or `"MXFP8"`/`"FP4+FP8"` silently become `FP8`. It lives in
    `shared/prec.mjs`, mirrored byte-for-byte into `app.js` (drift-guarded by a test).
 6. **Every displayed number traces to a source.** Recipes, HF `config.json`, or an NVIDIA
-   datasheet — or it is computed from those and marked as an estimate (`~ ≈ ° † ‡ *`).
+   datasheet — or it is computed from those and marked as an estimate (`~ ≈ ° † ‡ * ≤`).
    If you cannot source it, do not display it. This is why benchmarks are gone.
 
 ### Verification loop (run all three, always)

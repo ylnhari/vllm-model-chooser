@@ -6,7 +6,7 @@ import { loadApp } from './harness.mjs';
 import { normalizePrec as sharedNormalizePrec } from '../shared/prec.mjs';
 
 const app = loadApp();
-const { normalizePrec, isPrecCompatible, precSupportLevel, getGPUVRAM, getGPUBudget,
+const { normalizePrec, isPrecCompatible, precSupportLevel, getGPUVRAM,
         estKVCacheGB, modelFitsGPU, MODELS_DATA, GPU_CONFIG, GPU_QUANT_COMPAT } = app;
 
 // ---------------------------------------------------------------------------
@@ -108,35 +108,26 @@ test('isPrecCompatible: fail-safe — unknown GPU or unknown format returns true
 });
 
 // ---------------------------------------------------------------------------
-// Memory budget — mirrors vLLM: budget = physical x util; weights+KV = budget - reserve
+// Memory budget — mirrors vLLM: weights + KV must fit in physical x gpu-memory-utilization
 // ---------------------------------------------------------------------------
-test('getGPUBudget: physical x gpu-memory-utilization, scaled by GPU count', () => {
+test('getGPUVRAM: physical x gpu-memory-utilization, scaled by GPU count', () => {
   app.setMemUtil(0.95);
   app.setGpuType('A100-80GB');
-  assert.equal(getGPUBudget(1), 76);        // 80 * 0.95
-  assert.equal(getGPUBudget(4), 304);
-  app.setMemUtil(0.90);                     // vLLM's own default
-  assert.equal(getGPUBudget(1), 72);        // 80 * 0.90
+  assert.equal(getGPUVRAM(1), 76);          // 80 * 0.95
+  assert.equal(getGPUVRAM(4), 304);
+  app.setMemUtil(0.92);                     // vLLM's own default
+  assert.ok(Math.abs(getGPUVRAM(1) - 73.6) < 1e-9);   // 80 * 0.92
   app.setMemUtil(0.95);
 });
 
-test('getGPUVRAM: usable = budget - activation reserve (per GPU)', () => {
-  app.setGpuType('A100-80GB');
-  app.setMemUtil(0.95);
-  app.setReserve(2);
-  assert.equal(getGPUVRAM(1), 74);          // 80*0.95 - 2
-  assert.equal(getGPUVRAM(4), 296);         // 4*(76 - 2)
-  app.setReserve(0);
-  assert.equal(getGPUVRAM(4), 304);         // reserve is genuinely subtractable
-  app.setReserve(app.DEFAULT_RESERVE_GB);
+test("DEFAULT_MEM_UTIL matches vLLM's own default (vllm/config/cache.py)", () => {
+  assert.equal(app.DEFAULT_MEM_UTIL, 0.92);
 });
 
-test('getGPUVRAM: the reserve is per-GPU, so it scales with GPU count', () => {
+test('getGPUVRAM: no hidden headroom — nothing is subtracted from the budget', () => {
   app.setGpuType('H100-80GB');
   app.setMemUtil(0.95);
-  app.setReserve(4);
-  assert.equal(getGPUVRAM(8), 8 * (80 * 0.95 - 4));
-  app.setReserve(app.DEFAULT_RESERVE_GB);
+  assert.equal(getGPUVRAM(8), 8 * 80 * 0.95);
 });
 
 test('GPU_CONFIG: carries PHYSICAL vram only — no baked-in usable value to drift', () => {
@@ -167,12 +158,15 @@ test('modelFitsGPU: the quant gate blocks a Blackwell-only NVFP4 variant on Hopp
   // DeepSeek-V3 (id 120): base FP8 671GB (weight-only), NVFP4 variant 336GB (Blackwell only).
   const m = MODELS_DATA.find(x => x.id === 120);
   app.setMemUtil(0.95);
-  app.setReserve(2);
   app.setGpuType('H100-80GB');
-  // 8x H100 = 8*(80*0.95 - 2) = 592GB: base FP8 (671) doesn't fit; NVFP4 (336) fits
+  // 8x H100 = 8*80*0.95 = 608GB: base FP8 (671) doesn't fit; NVFP4 (336) fits
   // VRAM but is unsupported on Hopper, so the model is blocked by the quant gate.
   const blocked = modelFitsGPU(m, 8);
   assert.equal(blocked.fits, false);
+  // On a miss, `weights` is the smallest candidate and `prec` must name THAT candidate —
+  // the modal used to print the base precision (FP8) next to the NVFP4 size.
+  assert.equal(blocked.weights, 336);
+  assert.equal(blocked.prec, 'NVFP4');
   assert.equal(blocked.reason, 'quant');
   // 3x B200 = 3*(192*0.95 - 2) = 541GB: base FP8 671 doesn't fit; NVFP4 336 fits VRAM
   // AND is Blackwell-native → the variant is selected.
@@ -347,7 +341,6 @@ test('data: KV geometry fields are non-negative integers with a known provenance
 test('maxConcurrentRequests: derives from the KV pool, and shrinks as context grows', () => {
   app.setGpuType('H200-141GB');
   app.setMemUtil(0.95);
-  app.setReserve(2);
   const m = MODELS_DATA.find(x => x.kvBytesPerToken > 0 && x.vram < 40);
   const at32k = app.maxConcurrentRequests(m, m.vram, 2, 32768);
   const at128k = app.maxConcurrentRequests(m, m.vram, 2, 131072);

@@ -14,10 +14,10 @@ Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. 
 
 - **6 GPU types**: L4, A100, H100, H200, B100, B200 — with 1–8× multi-GPU
 - **VRAM + quantization dual check**: Models are filtered by BOTH memory budget AND quantization format compatibility, tri-state native/software/unsupported (NVFP4 → Blackwell only; MXFP4 → software on A100/Hopper, native on Blackwell)
-- **vLLM-faithful memory budget**: `budget = physical × gpu-memory-utilization`, then `KV pool = budget − weights − activation reserve` — the same accounting vLLM does. Both the utilization and the reserve are **user controls**, not buried constants.
+- **vLLM-faithful memory budget**: `budget = physical × gpu-memory-utilization` is the ceiling for the whole vLLM instance, and `KV pool ≤ budget − weights` — the same accounting vLLM does. The utilization is a **user control** (default 0.92, vLLM's own), not a buried constant. The activation peak vLLM measures at startup is deliberately **not** modelled, so the KV pool is shown as an upper bound.
 - **Real KV-cache geometry**: computed per model from its HuggingFace `config.json` — including MLA (DeepSeek) and **sliding-window attention**, where only some layers cache the full context and the rest are capped at the window. Selectable FP16/FP8 KV dtype.
 - **Worst-case concurrency**: how many full-context requests fit in the KV pool left after weights
-- **Shareable URLs**: filter state (including util / reserve / KV dtype) is reflected into query params
+- **Shareable URLs**: filter state (including util / KV dtype) is reflected into query params
 - **115 models**: params, weight-only VRAM, context length, quantization variants, KV geometry
 - **GPU compatibility info modal**: Native HW vs vLLM SW support per format, GPU specs + memory-budget table, quantization compatibility matrix
 - **vLLM Recipe & HuggingFace links** per model
@@ -82,12 +82,11 @@ Tri-state: **Native** = hardware tensor cores · **vLLM SW** = software path (lo
 `GPU_CONFIG` carries **physical** VRAM only. The usable figure is derived at runtime, mirroring vLLM:
 
 ```
-budget          = physical × gpu-memory-utilization     # default 0.95 (vLLM's own default is 0.90–0.92)
-weights + KV    = budget − activation/CUDA-graph reserve # default 2 GB/GPU  ← an ASSUMPTION
-KV cache pool   = (weights + KV) − weights               # vLLM fills this greedily; it caps concurrency
+budget          = physical × gpu-memory-utilization     # default 0.92 — vLLM's own default
+KV cache pool   ≤ budget − weights                      # vLLM fills this greedily; it caps concurrency
 ```
 
-Both knobs are exposed in the filter bar. The **activation reserve is explicitly an assumption**: vLLM does not compute it, it *measures* it by profiling a real forward pass at startup, and it scales with `--max-num-batched-tokens`. It is a visible, adjustable control (settable to 0) rather than a hidden fudge factor — which is why it's marked `*` in the UI.
+`--gpu-memory-utilization` is the ceiling for the **whole** vLLM instance — weights, activations, CUDA graphs and KV cache all live inside it (`vllm/v1/worker/gpu_worker.py`, `determine_available_memory`). The utilization is exposed in the filter bar. What vLLM actually subtracts before sizing the KV cache is the activation/CUDA-graph peak it **measures** at startup by profiling a dummy forward pass; that figure scales with `--max-num-batched-tokens` and the model's hidden size (real logs run from under 0.1 GiB for a 0.5B model to over 30 GiB for a large model at a large batch), and nothing in this app's data can source it. It is therefore **not modelled**: every KV pool is shown as an upper bound (`≤`), and a fit with only a few GB to spare may not survive the real profile. An earlier version exposed a flat per-GPU "activation reserve" control; it was removed because a number with no source violates the rule that every displayed figure traces to one.
 
 | GPU | Physical | Architecture | Memory |
 |-----|----------|--------------|--------|
@@ -138,7 +137,7 @@ All factual data is derived from the sources below. **Trust these sources, in th
 | **Variants & precisions** | same recipe → `.variants.*` | `precision`, `vram_minimum_gb` (**KV-INCLUSIVE — do not copy into our weight-only `vram`**), and `description` (carries hardware hints like "for Blackwell GPUs", "fits on 1xA100"). |
 | **Quantization × GPU compatibility** (`GPU_QUANT_COMPAT`) | [vLLM quantization "supported hardware" docs](https://docs.vllm.ai/en/latest/features/quantization/supported_hardware/) | Primary matrix of method × architecture. Corroborate per-model with the recipe variant `description` and `hardware_overrides` keys (`blackwell` / `hopper` / `amd`). |
 | **GPU hardware specs** (`GPU_CONFIG`) | NVIDIA datasheets | **Physical** VRAM, architecture, sm version, memory type. No `usableVram` — that's derived at runtime from the utilization knob, so there's no second value to drift. The recipe `recommended_command.hardware_profile.description` gives authoritative blurbs (e.g. "NVIDIA H200 SXM 141 GB HBM3e"). |
-| **Memory budget** (util, reserve) | [vLLM engine args](https://docs.vllm.ai/en/latest/configuration/engine_args.html) | `budget = physical × --gpu-memory-utilization`; KV is allocated greedily into what's left after weights + activations. Both are runtime user controls. The activation reserve is an **assumption** — vLLM *measures* it by profiling at startup. |
+| **Memory budget** (util) | [vLLM engine args](https://docs.vllm.ai/en/latest/configuration/engine_args.html), `vllm/config/cache.py` (default 0.92) | `budget = physical × --gpu-memory-utilization` for the whole instance; KV is allocated greedily into what's left after weights + the activation peak vLLM *measures* at startup. The utilization is a runtime user control; the measured peak is not modelled, so the KV pool is an upper bound. |
 | **Weight-only VRAM** (our `vram` field) | computed, not copied | `totalParams × bytesPerParam` — BF16 ×2, FP8/MXFP8/INT8 ×1, INT4/NVFP4/MXFP4/W4A16 ×0.5. Recipe `vram_minimum_gb` includes KV cache, so don't use it directly. Mixed-precision (MXFP4/`FP4+FP8`/`AMD-FP8`) stays curated — the naive formula understates it. Real checkpoints run a few % larger (quant scales, unquantized embeddings/lm_head). |
 | **KV-cache geometry** (`kvBytesPerToken`, `kvSlidingBytesPerToken`, `kvWindow`, `kvSource`) | HuggingFace `config.json` | Per attention layer: `2 × num_kv_heads × head_dim × 2B` (GQA/MHA) or `(kv_lora_rank + qk_rope_head_dim) × 2B` (MLA — a single compressed latent, **not** ×heads, **not** ×2). Layers are then split into full-attention vs sliding-window (`layer_types`, or `sliding_window` + `sliding_window_pattern`); Mamba/linear layers cache nothing and are excluded. See `kvBytesPerTokenFromConfig` in the generator. |
 | **Benchmarks** | ❌ **none — deliberately removed** | Only 2/115 models expose structured eval metrics on HF, and they aren't comparable. There is no authoritative source, so the tool shows no scores rather than unsourced ones. Do not re-add hand-curated numbers; a test blocks it. |

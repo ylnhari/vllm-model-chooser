@@ -37,14 +37,20 @@ function isPrecCompatible(prec, gpuType) {
 // --- Memory budget model ----------------------------------------------------
 // Mirrors how vLLM actually accounts for GPU memory (--gpu-memory-utilization):
 //
-//     budget   = physical VRAM × util          ← vLLM's hard ceiling
-//     kv pool  = budget − weights − activation/CUDA-graph reserve
+//     budget   = physical VRAM × util          ← vLLM's hard ceiling for the WHOLE
+//                                                 instance: weights + activations +
+//                                                 CUDA graphs + KV cache
+//     kv pool  = budget − weights − measured activation/CUDA-graph peak
 //
 // vLLM allocates the KV cache GREEDILY into whatever is left inside the budget after
-// weights and activations. So weights + KV must fit under (budget − reserve).
+// weights and the activation peak. The activation peak is MEASURED at startup by
+// profiling a dummy forward pass (vllm/v1/worker/gpu_worker.py determine_available_memory)
+// and scales with --max-num-batched-tokens and the model's hidden size; real logs
+// range from <0.1 GiB (0.5B model) to >30 GiB (big model, big batch). There is no
+// sourced way to estimate it from the data this app carries, so it is deliberately
+// NOT modelled: the KV pool shown is an UPPER BOUND and is labelled as one.
 // Docs: https://docs.vllm.ai/en/latest/configuration/engine_args.html
-const DEFAULT_MEM_UTIL = 0.95;
-const DEFAULT_RESERVE_GB = 2;      // per GPU — an ASSUMPTION, see getReserveGB()
+const DEFAULT_MEM_UTIL = 0.92;     // vLLM's own default (vllm/config/cache.py)
 
 function numFromSelect(id, fallback) {
     const raw = document.getElementById(id)?.value;
@@ -52,31 +58,19 @@ function numFromSelect(id, fallback) {
     return Number.isFinite(n) ? n : fallback;
 }
 
-// Fraction of each GPU vLLM may use. vLLM's own default is 0.90–0.92; this app
-// defaults to 0.95, which is more optimistic — hence it's a user control, not a
-// buried constant.
+// Fraction of each GPU vLLM may use. Matches vLLM's default; a user control so the
+// budget can be tightened or loosened to match a real deployment.
 function getMemUtil() { return numFromSelect('memUtilSelect', DEFAULT_MEM_UTIL); }
-
-// Per-GPU activation + CUDA-graph reserve. IMPORTANT: vLLM does not COMPUTE this —
-// it MEASURES it by profiling a real forward pass at startup, and it scales with
-// --max-num-batched-tokens and the model's hidden size. Any fixed number here is an
-// assumption, which is exactly why it is a visible, user-adjustable control rather
-// than a hidden fudge factor.
-function getReserveGB() { return numFromSelect('reserveSelect', DEFAULT_RESERVE_GB); }
 
 function getGPUConfig() {
     return GPU_CONFIG[document.getElementById('gpuTypeSelect')?.value || 'L4-24GB'] || {};
 }
 
-// Total vLLM memory budget across `gpus` GPUs (weights + KV + activations).
-function getGPUBudget(gpus) {
-    return gpus * (getGPUConfig().vram || 80) * getMemUtil();
-}
-
-// What weights + KV may actually occupy: the budget minus the activation reserve.
-// Single source of truth for the capacity check — must exist EXACTLY once.
+// Total vLLM memory budget across `gpus` GPUs: physical × --gpu-memory-utilization.
+// Weights + KV must fit inside it. Single source of truth for the capacity check —
+// must exist EXACTLY once.
 function getGPUVRAM(gpus) {
-    return Math.max(0, getGPUBudget(gpus) - gpus * getReserveGB());
+    return gpus * (getGPUConfig().vram || 80) * getMemUtil();
 }
 
 // --- KV cache ----------------------------------------------------------------
@@ -136,12 +130,14 @@ let currentContextFilter = 0;
 let currentContextLength = 4096;
 
 // Dual check: BOTH VRAM capacity AND quantization format compatibility must pass.
-// weights + KV must fit under the usable budget (physical × util − activation reserve).
+// weights + KV must fit under the budget (physical × gpu-memory-utilization).
 // Returns the numbers the UI needs to *explain* the verdict, so the card's bar and its
 // ✓/✗ can never tell different stories:
-//   { fits, variant?, level?, reason?, weights, kv, usable }
+//   { fits, variant?, level?, reason?, weights, prec, kv, usable }
 // `weights` is the precision actually selected on a fit, or the smallest candidate on a
 // miss (i.e. the model's best case — "even its smallest quantization overflows").
+// `prec` names the precision `weights` belongs to, so the UI never labels a variant's
+// size with the base precision.
 function modelFitsGPU(model, gpus) {
     if (gpus === 0) return { fits: true, reason: "Any configuration" };
     const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
@@ -155,7 +151,7 @@ function modelFitsGPU(model, gpus) {
         if (c.vram + kv > usable) continue;
         const level = precSupportLevel(c.prec || model.prec, gpuType);
         if (level === null) { vramWouldFit = true; continue; }   // blocked by quant gate
-        const base = { fits: true, level, weights: c.vram, kv, usable };
+        const base = { fits: true, level, weights: c.vram, prec: c.prec || model.prec, kv, usable };
         return c.base ? base : { ...base, variant: c };
     }
     const smallest = candidates.filter(c => c.vram).sort((a, b) => a.vram - b.vram)[0];
@@ -163,6 +159,7 @@ function modelFitsGPU(model, gpus) {
         fits: false,
         reason: vramWouldFit ? 'quant' : 'vram',
         weights: smallest ? smallest.vram : model.vram,
+        prec: smallest ? (smallest.prec || model.prec) : model.prec,
         kv, usable,
     };
 }
@@ -222,7 +219,6 @@ function resetFilters() {
     setSelect('kvContextSelect', '0');
     setSelect('kvDtypeSelect', 'fp16');
     setSelect('memUtilSelect', String(DEFAULT_MEM_UTIL));
-    setSelect('reserveSelect', String(DEFAULT_RESERVE_GB));
     const search = document.getElementById('searchInput');
     if (search) search.value = '';
     setGPUFilter(1);   // also re-runs filterModels()
@@ -248,7 +244,7 @@ function getQuantBadgeClass(prec) {
     return 'badge-bf16';
 }
 
-// GB formatter — the budget is now fractional (physical × util − reserve).
+// GB formatter — the budget is fractional (physical × util).
 function fmtGB(gb) {
     if (gb == null) return '—';
     return gb >= 100 ? Math.round(gb).toString() : gb.toFixed(1).replace(/\.0$/, '');
@@ -495,12 +491,11 @@ function openModal(id) {
         : `<div class="text-xs text-[#f59e0b] mt-2">⚠️ VRAM shown is weights only. Enable the KV-cache estimate (top filter bar) to factor in context length.</div>`;
 
     // Memory budget for the currently-selected config, itemised the way vLLM accounts
-    // for it. Every line is a real quantity except the activation reserve, which is an
-    // assumption and is labelled as one.
+    // for it. The KV pool is an upper bound: vLLM also subtracts the activation /
+    // CUDA-graph peak it measures at startup, which this app cannot know.
     const gpus = currentGPUFilter || 1;
     const fit = modelFitsGPU(model, gpus);
-    const budget = getGPUBudget(gpus);
-    const reserve = gpus * getReserveGB();
+    const budget = getGPUVRAM(gpus);
     const weights = fit.weights ?? model.vram;
     const kvPool = Math.max(0, getGPUVRAM(gpus) - weights);
     const conc = maxConcurrentRequests(model, weights, gpus, kvTokens);
@@ -513,11 +508,9 @@ function openModal(id) {
     const budgetHTML = `
         <div class="bg-[#12121a] rounded-xl p-4 border border-[#2a2a3a] text-sm">
             ${row(`Physical VRAM — ${gpus}× ${gpuConfig.name}`, `${gpus * gpuConfig.vram} GB`)}
-            ${row(`× GPU memory utilization (${getMemUtil()})`, `${fmtGB(budget)} GB`)}
-            ${row(`− Activation / CUDA-graph reserve <span class="text-[#f59e0b]">(assumption)</span>`, `−${fmtGB(reserve)} GB`, 'text-[#f59e0b]')}
-            ${row(`= Usable for weights + KV`, `${fmtGB(getGPUVRAM(gpus))} GB`, 'text-[#22c55e]')}
-            ${row(`− Model weights${fit.variant ? ` (${fit.variant.prec})` : ` (${model.prec})`}`, `−${fmtGB(weights)} GB`)}
-            ${row(`= KV cache pool`, `${fmtGB(kvPool)} GB`, kvPool > 0 ? 'text-[#22c55e]' : 'text-[#ef4444]')}
+            ${row(`× GPU memory utilization (${getMemUtil()})`, `${fmtGB(budget)} GB`, 'text-[#22c55e]')}
+            ${row(`− Model weights (${fit.prec || model.prec})`, `−${fmtGB(weights)} GB`)}
+            ${row(`= KV cache pool <span class="text-[#f59e0b]">(upper bound)</span>`, `≤ ${fmtGB(kvPool)} GB`, kvPool > 0 ? 'text-[#22c55e]' : 'text-[#ef4444]')}
             ${conc != null ? row(
                 `≈ Concurrent requests @ ${formatContextLength(kvTokens)} <span class="text-[#666680]">(worst case)</span>`,
                 `${conc}`, conc > 0 ? 'text-[#6366f1]' : 'text-[#ef4444]') : ''}
@@ -526,7 +519,7 @@ function openModal(id) {
             Mirrors vLLM's own accounting: the KV cache is allocated greedily into whatever is left
             inside <code>--gpu-memory-utilization</code> after weights and activations.
             ${conc != null ? `The concurrency figure assumes <strong>every</strong> request fills the full ${formatContextLength(kvTokens)} context — real serving fits more, since requests are usually shorter and PagedAttention shares prefix blocks. Treat it as a floor.` : ''}
-            The activation reserve is an assumption: vLLM <em>measures</em> it by profiling a forward pass at startup, so it varies with batch size and model.
+            The KV pool is an <strong>upper bound</strong>: at startup vLLM also subtracts the activation and CUDA-graph peak it <em>measures</em> by profiling a dummy forward pass, which scales with <code>--max-num-batched-tokens</code> and the model's hidden size. This app cannot know that figure, so it is not modelled — a fit with only a few GB to spare may not survive it.
         </p>`;
 
     const gpuFeasHTML = [1, 2, 3, 4, 5, 6, 7, 8].map(gpu => {
@@ -623,7 +616,7 @@ document.addEventListener('keydown', (e) => {
 const URL_CONTROLS = {
     gpuType: 'gpuTypeSelect', quant: 'quantFilter', type: 'typeFilter',
     context: 'contextFilter', sort: 'sortSelect', kv: 'kvContextSelect', q: 'searchInput',
-    util: 'memUtilSelect', reserve: 'reserveSelect', kvdtype: 'kvDtypeSelect',
+    util: 'memUtilSelect', kvdtype: 'kvDtypeSelect',
 };
 let restoringState = false;
 
@@ -639,7 +632,6 @@ function syncStateToURL() {
             || (['quantFilter', 'typeFilter'].includes(id) && el.value === 'all')
             || (['contextFilter', 'kvContextSelect'].includes(id) && el.value === '0')
             || (id === 'memUtilSelect' && parseFloat(el.value) === DEFAULT_MEM_UTIL)
-            || (id === 'reserveSelect' && parseFloat(el.value) === DEFAULT_RESERVE_GB)
             || (id === 'kvDtypeSelect' && el.value === 'fp16');
         if (!isDefault) params.set(key, el.value);
     }
@@ -728,14 +720,12 @@ function openGPUInfoModal() {
     }).join('');
 
     const util = getMemUtil();
-    const reserve = getReserveGB();
     const specRows = Object.values(GPU_CONFIG).map(cfg => `
                             <tr class="border-b border-[#1a1a24]">
                                 <td class="py-3 px-2 font-medium">${cfg.name}</td>
                                 <td class="py-3 px-2 text-[#8888a0]">${cfg.architecture} (${cfg.sm})</td>
                                 <td class="py-3 px-2 text-right">${cfg.vram} GB</td>
-                                <td class="py-3 px-2 text-right text-[#8888a0]">${fmtGB(cfg.vram * util)} GB</td>
-                                <td class="py-3 px-2 text-right text-[#22c55e]">${fmtGB(Math.max(0, cfg.vram * util - reserve))} GB</td>
+                                <td class="py-3 px-2 text-right text-[#22c55e]">${fmtGB(cfg.vram * util)} GB</td>
                                 <td class="py-3 px-2 text-[#8888a0]">${cfg.memory}</td>
                             </tr>`).join('');
 
@@ -772,7 +762,6 @@ function openGPUInfoModal() {
                                 <th class="text-left py-3 px-2">Architecture</th>
                                 <th class="text-right py-3 px-2">Physical</th>
                                 <th class="text-right py-3 px-2">Budget (×${util})</th>
-                                <th class="text-right py-3 px-2">Weights + KV</th>
                                 <th class="text-left py-3 px-2">Memory</th>
                             </tr>
                         </thead>
@@ -781,9 +770,9 @@ function openGPUInfoModal() {
                     </table>
                 </div>
                 <div class="mt-3 text-xs text-[#666680] space-y-1">
-                    <p><strong class="text-[#8888a0]">Budget</strong> = physical × <code>--gpu-memory-utilization</code> (currently <strong>${util}</strong>). vLLM's own default is 0.90–0.92, so 0.95 is the optimistic end — change it in the filter bar.</p>
-                    <p><strong class="text-[#8888a0]">Weights + KV</strong> = budget − activation/CUDA-graph reserve (currently <strong>${fmtGB(reserve)} GB/GPU</strong>). <span class="text-[#f59e0b]">This reserve is an assumption</span> — vLLM measures it by profiling a forward pass at startup, so it varies with batch size and model. Adjust or zero it in the filter bar.</p>
-                    <p>vLLM then fills the remaining <strong class="text-[#8888a0]">KV cache pool</strong> greedily with cached tokens — which is what caps concurrency.</p>
+                    <p><strong class="text-[#8888a0]">Budget</strong> = physical × <code>--gpu-memory-utilization</code> (currently <strong>${util}</strong>; vLLM's own default is 0.92). It is the ceiling for the <em>whole</em> vLLM instance: weights, activations, CUDA graphs and KV cache. Change it in the filter bar.</p>
+                    <p><strong class="text-[#8888a0]">KV cache pool</strong> = budget − weights − the activation/CUDA-graph peak vLLM <em>measures</em> at startup by profiling a dummy forward pass. <span class="text-[#f59e0b]">This app does not model that peak</span> — it scales with <code>--max-num-batched-tokens</code> and the model's hidden size, so every KV pool shown is an upper bound.</p>
+                    <p>vLLM fills the KV pool greedily with cached tokens — which is what caps concurrency.</p>
                 </div>
             </div>
 

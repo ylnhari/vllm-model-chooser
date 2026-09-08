@@ -228,23 +228,13 @@
                     </select>
                 </div>
                 <div class="flex items-center gap-2">
-                    <span class="text-sm text-[#8888a0] font-medium" title="vLLM's --gpu-memory-utilization: the fraction of each GPU vLLM may use for weights + KV + activations. vLLM's own default is 0.90-0.92; 0.95 is the optimistic end.">Mem util:</span>
+                    <span class="text-sm text-[#8888a0] font-medium" title="vLLM's --gpu-memory-utilization: the fraction of each GPU the whole vLLM instance may use (weights + activations + CUDA graphs + KV cache). vLLM's own default is 0.92.">Mem util:</span>
                     <select id="memUtilSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
                         <option value="0.85">0.85</option>
-                        <option value="0.90">0.90 (vLLM default)</option>
-                        <option value="0.92">0.92</option>
-                        <option value="0.95" selected>0.95</option>
+                        <option value="0.90">0.90</option>
+                        <option value="0.92" selected>0.92 (vLLM default)</option>
+                        <option value="0.95">0.95</option>
                         <option value="0.98">0.98</option>
-                    </select>
-                </div>
-                <div class="flex items-center gap-2">
-                    <span class="text-sm text-[#8888a0] font-medium" title="ASSUMPTION, not a measurement. Per-GPU headroom for activations and CUDA graphs. vLLM does not compute this - it profiles a real forward pass at startup to measure it, and it scales with --max-num-batched-tokens. Adjust or zero it to taste.">Reserve<span class="text-[#f59e0b]">*</span>:</span>
-                    <select id="reserveSelect" onchange="filterModels()" class="filter-btn px-3 py-1.5 rounded-lg text-sm bg-[#12121a] border border-[#2a2a3a] text-white">
-                        <option value="0">0 GB/GPU</option>
-                        <option value="1">1 GB/GPU</option>
-                        <option value="2" selected>2 GB/GPU</option>
-                        <option value="4">4 GB/GPU</option>
-                        <option value="8">8 GB/GPU</option>
                     </select>
                 </div>
                 <button onclick="resetFilters()" class="filter-btn px-3 py-1.5 rounded-lg text-sm" title="Reset all filters to defaults">Reset</button>
@@ -333,15 +323,15 @@
                         </div>
                     </div>
                     <div class="card p-5 flex gap-4">
-                        <div class="text-3xl font-bold text-[#f59e0b] w-16 shrink-0 text-center leading-none pt-1">*</div>
+                        <div class="text-3xl font-bold text-[#f59e0b] w-16 shrink-0 text-center leading-none pt-1">≤</div>
                         <div>
-                            <div class="font-semibold mb-1">The activation reserve is an assumption</div>
+                            <div class="font-semibold mb-1">The KV cache pool is an upper bound</div>
                             <p class="text-sm text-[#8888a0]">
-                                The per-GPU headroom set aside for activations and CUDA graphs (the
-                                <strong>Reserve</strong> control in the filter bar) is a guess, not a
-                                calculation. vLLM <em>measures</em> it at startup by profiling a real forward pass,
-                                so it shifts with batch size, sequence length and model. Raise it to be safe,
-                                lower it to see what a tighter server would fit.
+                                vLLM sizes the KV cache as budget − weights − the activation and CUDA-graph peak it
+                                <em>measures</em> at startup by profiling a dummy forward pass. That peak scales with
+                                <code>--max-num-batched-tokens</code> and the model's hidden size, and there is no
+                                sourced way to estimate it here, so it is not modelled. A fit with only a few GB to
+                                spare may not survive it; lower <strong>Mem util</strong> to see a tighter server.
                             </p>
                         </div>
                     </div>
@@ -368,8 +358,8 @@
                             <div class="font-semibold mb-1">Does it fit on N GPUs?</div>
                             <p class="text-sm text-[#8888a0]">
                                 <span class="text-[#22c55e] font-semibold">✓</span> = model weights (plus the KV cache,
-                                if you switched the KV estimate on) sit inside the usable budget: physical VRAM ×
-                                memory utilization − activation reserve. <span class="text-[#ef4444] font-semibold">✗</span>
+                                if you switched the KV estimate on) sit inside the budget: physical VRAM ×
+                                memory utilization. <span class="text-[#ef4444] font-semibold">✗</span>
                                 = too large, or the quantization format isn't supported on that GPU at all. Hover any
                                 verdict for the arithmetic behind it.
                             </p>
