@@ -52,6 +52,26 @@ function isPrecCompatible(prec, gpuType) {
 // Docs: https://docs.vllm.ai/en/latest/configuration/engine_args.html
 const DEFAULT_MEM_UTIL = 0.92;     // vLLM's own default (vllm/config/cache.py)
 
+// HEURISTIC WARNING BAND — NOT a subtracted quantity. Nothing is ever taken off the
+// budget; the fit check stays `weights + kv <= usable`. A fit whose leftover headroom
+// (usable − weights − kv) is below this many GB per GPU is merely FLAGGED as "tight",
+// because the activation/CUDA-graph peak vLLM measures at startup may not fit in it.
+// The band is not a measurement of that peak; it is sized from real per-GPU
+// "PyTorch activation peak memory" figures in vLLM startup logs:
+//   Gemma-3-27b-it, 4× A100 40GB, vLLM 0.9.1, max_model_len 131072: 17.91 GiB/GPU;
+//     same model at max_model_len 4096: 1.41 GiB/GPU.
+//     https://huggingface.co/google/gemma-3-27b-it/discussions/75
+//   DeepSeek-R1, L40S, TP8 PP4, max_model_len 16384, vLLM 0.7.3: 1.52 GiB/GPU, then
+//     OOMed later during CUDA-graph capture at util 0.98.
+//     https://github.com/vllm-project/vllm/issues/15598
+//   Qwen3-0.6B-FP8, RTX 5090, max_model_len 40960: torch peak increase 0.52 GiB.
+//     https://forums.developer.nvidia.com/t/with-the-same-model-and-vllm-image-gb10-uses-more-vram-than-x86-gpu/353523
+//   Qwen2.5-0.5B-Instruct-AWQ, max_num_batched_tokens 2048, max_num_seqs 1: 0.09 GiB.
+//     https://github.com/vllm-project/vllm/issues/16141
+// At vLLM defaults, mid-size models land in the 1–18 GiB range; 8 GB/GPU flags the
+// danger zone without claiming precision. Do not present it as a measurement.
+const TIGHT_HEADROOM_GB_PER_GPU = 8;
+
 function numFromSelect(id, fallback) {
     const raw = document.getElementById(id)?.value;
     const n = parseFloat(raw);
@@ -133,11 +153,16 @@ let currentContextLength = 4096;
 // weights + KV must fit under the budget (physical × gpu-memory-utilization).
 // Returns the numbers the UI needs to *explain* the verdict, so the card's bar and its
 // ✓/✗ can never tell different stories:
-//   { fits, variant?, level?, reason?, weights, prec, kv, usable }
+//   { fits, variant?, level?, reason?, weights, prec, kv, usable, headroom?, tight? }
 // `weights` is the precision actually selected on a fit, or the smallest candidate on a
 // miss (i.e. the model's best case — "even its smallest quantization overflows").
 // `prec` names the precision `weights` belongs to, so the UI never labels a variant's
 // size with the base precision.
+// On a fit, `headroom` = usable − weights − kv (what is left for the activation /
+// CUDA-graph peak vLLM measures at startup) and `tight` flags headroom below
+// TIGHT_HEADROOM_GB_PER_GPU × gpus. A tight fit is STILL a fit — it is a warning,
+// never a rejection, and nothing is subtracted from the budget. On a miss, `tight`
+// is undefined.
 function modelFitsGPU(model, gpus) {
     if (gpus === 0) return { fits: true, reason: "Any configuration" };
     const gpuType = document.getElementById('gpuTypeSelect')?.value || 'L4-24GB';
@@ -151,7 +176,9 @@ function modelFitsGPU(model, gpus) {
         if (c.vram + kv > usable) continue;
         const level = precSupportLevel(c.prec || model.prec, gpuType);
         if (level === null) { vramWouldFit = true; continue; }   // blocked by quant gate
-        const base = { fits: true, level, weights: c.vram, prec: c.prec || model.prec, kv, usable };
+        const headroom = usable - c.vram - kv;
+        const tight = headroom < TIGHT_HEADROOM_GB_PER_GPU * gpus;
+        const base = { fits: true, level, weights: c.vram, prec: c.prec || model.prec, kv, usable, headroom, tight };
         return c.base ? base : { ...base, variant: c };
     }
     const smallest = candidates.filter(c => c.vram).sort((a, b) => a.vram - b.vram)[0];
@@ -266,7 +293,10 @@ function fitTooltip(result, gpus, gpuConfig) {
         const via = result.variant ? `${result.variant.prec} variant` : 'base precision';
         const sw = result.level === 'sw' ? ' — vLLM software path, loads but no speedup' : '';
         const kv = result.kv ? ` — ${fmtGB(result.weights)}GB weights + ~${fmtGB(result.kv)}GB KV` : '';
-        return `Fits on ${where} via ${via}${sw}${kv}`;
+        const tight = result.tight
+            ? ` — TIGHT: only ${fmtGB(result.headroom)} GB to spare (under the ${TIGHT_HEADROOM_GB_PER_GPU} GB/GPU heuristic); vLLM's measured activation/CUDA-graph peak may not fit — lower --max-num-batched-tokens / --max-model-len or pick a smaller quantization`
+            : '';
+        return `Fits on ${where} via ${via}${sw}${kv}${tight}`;
     }
     if (result.reason === 'quant') return `Would fit VRAM on ${where}, but the required format is unsupported on this GPU`;
     return `Exceeds available VRAM on ${where} (needs ${fmtGB(result.weights + result.kv)}GB)`;
@@ -338,7 +368,7 @@ function renderModels() {
             <div class="mb-4">
                 <div class="flex justify-between text-xs text-[#8888a0] mb-1">
                     <span>${currentGPUFilter}× ${gpuConfig.name} budget</span>
-                    <span class="${over ? 'text-[#ef4444]' : 'text-[#8888a0]'}">${fmtGB(total)} / ${fmtGB(usable)} GB</span>
+                    <span class="${over ? 'text-[#ef4444]' : (fit.tight ? 'text-[#f59e0b]' : 'text-[#8888a0]')}"${fit.tight ? ` title="Tight: only ${fmtGB(fit.headroom)} GB left for vLLM's measured activation/CUDA-graph peak (under the ${TIGHT_HEADROOM_GB_PER_GPU} GB/GPU heuristic)"` : ''}>${fmtGB(total)} / ${fmtGB(usable)} GB${fit.tight ? ' (tight)' : ''}</span>
                 </div>
                 <div class="gpu-bar flex">
                     <div class="gpu-bar-seg ${over ? 'seg-over' : 'seg-weights'}" style="width: ${wPct}%"></div>
@@ -386,7 +416,7 @@ function renderModels() {
                     const sel = gpu === currentGPUFilter ? ' bg-[#1a1a28] rounded-lg' : '';
                     return `<div class="flex-1 text-center py-1${sel}" title="${fitTooltip(result, gpu, gpuConfig)}">
                         <div class="text-xs text-[#8888a0]">${gpu}×</div>
-                        <div class="${result.fits ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-bold text-lg">${result.fits ? (result.level === 'sw' ? '✓*' : '✓') : '✗'}</div>
+                        <div class="${result.fits ? (result.tight ? 'text-[#f59e0b]' : 'text-[#22c55e]') : 'text-[#ef4444]'} font-bold text-lg">${result.fits ? (result.level === 'sw' ? '✓*' : '✓') : '✗'}</div>
                     </div>`;
                 }).join('')}
             </div>
@@ -511,6 +541,11 @@ function openModal(id) {
             ${row(`× GPU memory utilization (${getMemUtil()})`, `${fmtGB(budget)} GB`, 'text-[#22c55e]')}
             ${row(`− Model weights (${fit.prec || model.prec})`, `−${fmtGB(weights)} GB`)}
             ${row(`= KV cache pool <span class="text-[#f59e0b]">(upper bound)</span>`, `≤ ${fmtGB(kvPool)} GB`, kvPool > 0 ? 'text-[#22c55e]' : 'text-[#ef4444]')}
+            ${kvTokens && fit.fits ? row(
+                `− KV cache @ ${formatContextLength(kvTokens)}`, `−${fmtGB(fit.kv)} GB`) : ''}
+            ${kvTokens && fit.fits ? row(
+                `= Headroom for activations / CUDA graphs${fit.tight ? ` <span class="text-[#f59e0b]">(tight — under ${TIGHT_HEADROOM_GB_PER_GPU} GB/GPU heuristic)</span>` : ''}`,
+                `${fmtGB(fit.headroom)} GB${fit.tight ? ' (tight)' : ''}`, fit.tight ? 'text-[#f59e0b]' : 'text-[#22c55e]') : ''}
             ${conc != null ? row(
                 `≈ Concurrent requests @ ${formatContextLength(kvTokens)} <span class="text-[#666680]">(worst case)</span>`,
                 `${conc}`, conc > 0 ? 'text-[#6366f1]' : 'text-[#ef4444]') : ''}
@@ -519,7 +554,7 @@ function openModal(id) {
             Mirrors vLLM's own accounting: the KV cache is allocated greedily into whatever is left
             inside <code>--gpu-memory-utilization</code> after weights and activations.
             ${conc != null ? `The concurrency figure assumes <strong>every</strong> request fills the full ${formatContextLength(kvTokens)} context — real serving fits more, since requests are usually shorter and PagedAttention shares prefix blocks. Treat it as a floor.` : ''}
-            The KV pool is an <strong>upper bound</strong>: at startup vLLM also subtracts the activation and CUDA-graph peak it <em>measures</em> by profiling a dummy forward pass, which scales with <code>--max-num-batched-tokens</code> and the model's hidden size. This app cannot know that figure, so it is not modelled — a fit with only a few GB to spare may not survive it.
+            The KV pool is an <strong>upper bound</strong>: at startup vLLM also subtracts the activation and CUDA-graph peak it <em>measures</em> by profiling a dummy forward pass, which scales with <code>--max-num-batched-tokens</code> and the model's hidden size. This app cannot know that figure, so it is not modelled — a fit with only a few GB to spare may not survive it. Fits with under <strong>${TIGHT_HEADROOM_GB_PER_GPU} GB/GPU</strong> of headroom are flagged <span class="text-[#f59e0b]">tight</span>; that band is a heuristic sized from real vLLM startup logs (per-GPU activation peaks of roughly 1–18 GiB at default settings), not a measurement, and nothing is subtracted from the budget.
         </p>`;
 
     const gpuFeasHTML = [1, 2, 3, 4, 5, 6, 7, 8].map(gpu => {
@@ -528,11 +563,11 @@ function openModal(id) {
         const detail = result.fits
             ? (result.variant ? ` (${result.variant.prec} variant${result.level === 'sw' ? ', SW' : ''})` : (result.level === 'sw' ? ' (software path)' : ''))
             : (result.reason === 'quant' ? ' (format unsupported)' : '');
-        const label = result.fits ? '✓ Fits' : '✗ Too Large';
+        const label = result.fits ? (result.tight ? '✓ Fits (tight)' : '✓ Fits') : '✗ Too Large';
         return `
             <div class="flex items-center justify-between bg-[#12121a] rounded-lg p-3" title="${fitTooltip(result, gpu, gpuConfig)}">
                 <span class="font-medium">${gpu}× ${gpuConfig.name} (${fmtGB(vram)}GB usable)</span>
-                <span class="${result.fits ? 'text-[#22c55e]' : 'text-[#ef4444]'} font-bold">
+                <span class="${result.fits ? (result.tight ? 'text-[#f59e0b]' : 'text-[#22c55e]') : 'text-[#ef4444]'} font-bold">
                     ${label}<span class="text-xs text-[#8888a0]">${detail}</span>
                 </span>
             </div>

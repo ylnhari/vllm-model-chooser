@@ -131,6 +131,18 @@ is labelled an upper bound (`≤`) instead. If a per-model estimate is ever want
 add `hidden_size`/`intermediate_size` to the generator's HF-config read and derive it from
 those plus a batched-tokens input; never reintroduce a bare constant.
 
+**The "tight" band is a heuristic warning, not a budget term.** `modelFitsGPU` also returns
+`headroom = usable − weights − kv` and `tight = headroom < TIGHT_HEADROOM_GB_PER_GPU × gpus`
+(8 GB/GPU, defined next to `DEFAULT_MEM_UTIL` in `app.js`). A tight fit is still a fit — it
+only changes colour (amber ✓, "(tight)" labels, a headroom row in the modal). The band is
+**never subtracted** from the budget and must not be presented as a measurement of the
+activation peak. It is sourced by real per-GPU "PyTorch activation peak memory" datapoints
+from vLLM startup logs (Gemma-3-27B 17.91 GiB at 128K / 1.41 GiB at 4K; DeepSeek-R1 on L40S
+1.52 GiB; Qwen3-0.6B 0.52 GiB; Qwen2.5-0.5B 0.09 GiB — URLs in the `app.js` comment and
+README). That is what distinguishes it from the removed "activation reserve": it is a
+flagged range with cited evidence, not a subtracted number with none. If you change the
+threshold, re-source it.
+
 ### Add a new ARCHITECTURE (KV-cache geometry)
 KV is **not** a single bytes-per-token constant. The app computes:
 
@@ -221,8 +233,9 @@ marked unsupported on A100 when the recipes explicitly run gpt-oss on one).
 3. **One `getGPUVRAM`.** It is the single source of truth for capacity
    (`physical × util`). Never add a second definition or a hardcoded fallback.
 4. **Dual check.** `modelFitsGPU` must gate on BOTH capacity AND `precSupportLevel`.
-   It returns the numbers the UI draws (`weights`/`kv`/`usable`) so the card's bar and its
-   ✓/✗ are physically incapable of disagreeing — they used to, badly.
+   It returns the numbers the UI draws (`weights`/`kv`/`usable`, plus `headroom`/`tight` on
+   a fit) so the card's bar, its ✓/✗ and the amber "tight" colouring are physically
+   incapable of disagreeing — they used to, badly. `tight` never turns a fit into a miss.
 5. **`normalizePrec`: specific before generic.** `MXFP8` must be matched before `FP8`, and
    the FP4 family before `FP8`, or `"MXFP8"`/`"FP4+FP8"` silently become `FP8`. It lives in
    `shared/prec.mjs`, mirrored byte-for-byte into `app.js` (drift-guarded by a test).

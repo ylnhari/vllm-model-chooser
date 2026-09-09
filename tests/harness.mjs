@@ -57,7 +57,7 @@ export function loadApp() {
     'normalizePrec', 'isPrecCompatible', 'precSupportLevel',
     'getGPUVRAM', 'getMemUtil',
     'estKVCacheGB', 'modelFitsGPU', 'maxConcurrentRequests', 'filterModels',
-    'DEFAULT_MEM_UTIL',
+    'DEFAULT_MEM_UTIL', 'TIGHT_HEADROOM_GB_PER_GPU',
   ];
   const wrapped = `${data}\n${code}\n;globalThis.__app = { ${exported.join(', ')} };`;
   vm.runInContext(wrapped, sandbox);

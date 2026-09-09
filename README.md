@@ -15,6 +15,7 @@ Interactive web tool to find the optimal vLLM-compatible LLM for any GPU setup. 
 - **6 GPU types**: L4, A100, H100, H200, B100, B200 — with 1–8× multi-GPU
 - **VRAM + quantization dual check**: Models are filtered by BOTH memory budget AND quantization format compatibility, tri-state native/software/unsupported (NVFP4 → Blackwell only; MXFP4 → software on A100/Hopper, native on Blackwell)
 - **vLLM-faithful memory budget**: `budget = physical × gpu-memory-utilization` is the ceiling for the whole vLLM instance, and `KV pool ≤ budget − weights` — the same accounting vLLM does. The utilization is a **user control** (default 0.92, vLLM's own), not a buried constant. The activation peak vLLM measures at startup is deliberately **not** modelled, so the KV pool is shown as an upper bound.
+- **"Tight" fit verdict**: a fit that leaves under **8 GB per GPU** of headroom (budget − weights − KV) is shown as an amber ✓ instead of green. The 8 GB band is a heuristic warning sized from real vLLM startup logs (per-GPU activation peaks of about 0.1–18 GiB), never a subtracted quantity — a tight fit is still a fit.
 - **Real KV-cache geometry**: computed per model from its HuggingFace `config.json` — including MLA (DeepSeek) and **sliding-window attention**, where only some layers cache the full context and the rest are capped at the window. Selectable FP16/FP8 KV dtype.
 - **Worst-case concurrency**: how many full-context requests fit in the KV pool left after weights
 - **Shareable URLs**: filter state (including util / KV dtype) is reflected into query params
@@ -87,6 +88,17 @@ KV cache pool   ≤ budget − weights                      # vLLM fills this gr
 ```
 
 `--gpu-memory-utilization` is the ceiling for the **whole** vLLM instance — weights, activations, CUDA graphs and KV cache all live inside it (`vllm/v1/worker/gpu_worker.py`, `determine_available_memory`). The utilization is exposed in the filter bar. What vLLM actually subtracts before sizing the KV cache is the activation/CUDA-graph peak it **measures** at startup by profiling a dummy forward pass; that figure scales with `--max-num-batched-tokens` and the model's hidden size (real logs run from under 0.1 GiB for a 0.5B model to over 30 GiB for a large model at a large batch), and nothing in this app's data can source it. It is therefore **not modelled**: every KV pool is shown as an upper bound (`≤`), and a fit with only a few GB to spare may not survive the real profile. An earlier version exposed a flat per-GPU "activation reserve" control; it was removed because a number with no source violates the rule that every displayed figure traces to one.
+
+Instead, the app flags a **tight** fit: when `budget − weights − KV` is under `8 GB × GPUs`, the ✓ turns amber, the card's memory bar reads "(tight)", and the model modal shows a "Headroom for activations / CUDA graphs" row. The 8 GB/GPU band (`TIGHT_HEADROOM_GB_PER_GPU` in `app.js`) is a **heuristic warning band, not a measurement and not a subtraction** — a tight fit still counts as a fit everywhere. It is sized from real per-GPU "PyTorch activation peak memory" figures in vLLM startup logs:
+
+| Model / setup | Activation peak per GPU | Source |
+|---|---|---|
+| Gemma-3-27b-it, 4× A100 40GB, vLLM 0.9.1, `max_model_len` 131072 | 17.91 GiB (1.41 GiB at `max_model_len` 4096) | [HF discussion](https://huggingface.co/google/gemma-3-27b-it/discussions/75) |
+| DeepSeek-R1, L40S, TP8 PP4, `max_model_len` 16384, vLLM 0.7.3 | 1.52 GiB, then OOM during CUDA-graph capture at util 0.98 | [vllm#15598](https://github.com/vllm-project/vllm/issues/15598) |
+| Qwen3-0.6B-FP8, RTX 5090, `max_model_len` 40960 | 0.52 GiB torch peak increase | [NVIDIA forum](https://forums.developer.nvidia.com/t/with-the-same-model-and-vllm-image-gb10-uses-more-vram-than-x86-gpu/353523) |
+| Qwen2.5-0.5B-Instruct-AWQ, `max_num_batched_tokens` 2048, `max_num_seqs` 1 | 0.09 GiB | [vllm#16141](https://github.com/vllm-project/vllm/issues/16141) |
+
+At vLLM defaults, mid-size models land in the 1–18 GiB range; 8 GB flags the danger zone without claiming precision. If a fit is tight, lower `--max-num-batched-tokens` / `--max-model-len`, pick a smaller quantization, or add a GPU.
 
 | GPU | Physical | Architecture | Memory |
 |-----|----------|--------------|--------|

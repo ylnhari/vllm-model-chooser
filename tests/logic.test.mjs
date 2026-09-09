@@ -212,6 +212,82 @@ test('modelFitsGPU: fit is monotonic in GPU count', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The "tight" verdict — a heuristic warning band, never a subtraction
+// ---------------------------------------------------------------------------
+// vLLM subtracts an activation/CUDA-graph peak it MEASURES at startup; the app cannot
+// know it, so it flags (not rejects) fits with < TIGHT_HEADROOM_GB_PER_GPU × gpus left.
+test('modelFitsGPU: a fit with under the per-GPU headroom band is tight, but still fits', () => {
+  app.setGpuType('L4-24GB');       // 24 × 0.92 = 22.08 GB per GPU
+  app.setMemUtil(0.92);
+  app.setKVContext(0);
+  const band = app.TIGHT_HEADROOM_GB_PER_GPU;
+  assert.equal(band, 8);
+  const synth = vram => ({ prec: 'BF16', vram, variants: [], kvBytesPerToken: 0, kvSource: 'none', totalParams: 1 });
+  const r = modelFitsGPU(synth(20), 1);          // 22.08 − 20 = 2.08 GB left
+  assert.equal(r.fits, true, 'tight is a warning, never a rejection');
+  assert.equal(r.tight, true);
+  assert.ok(Math.abs(r.headroom - 2.08) < 1e-9);
+  assert.ok(r.weights + r.kv <= r.usable, 'nothing is subtracted from the budget');
+});
+
+test('modelFitsGPU: a fit with more than the band to spare is not tight', () => {
+  app.setGpuType('L4-24GB');
+  app.setMemUtil(0.92);
+  app.setKVContext(0);
+  const synth = vram => ({ prec: 'BF16', vram, variants: [], kvBytesPerToken: 0, kvSource: 'none', totalParams: 1 });
+  const r = modelFitsGPU(synth(10), 1);          // 22.08 − 10 = 12.08 GB left
+  assert.equal(r.fits, true);
+  assert.equal(r.tight, false);
+  assert.ok(Math.abs(r.headroom - 12.08) < 1e-9);
+});
+
+test('modelFitsGPU: the tight band scales with GPU count (8 GB per GPU, not per instance)', () => {
+  app.setGpuType('L4-24GB');
+  app.setMemUtil(0.92);
+  app.setKVContext(0);
+  const synth = vram => ({ prec: 'BF16', vram, variants: [], kvBytesPerToken: 0, kvSource: 'none', totalParams: 1 });
+  // 2× L4 = 44.16 GB. 30 GB of weights leaves 14.16 GB: over one GPU's band, under two.
+  const r2 = modelFitsGPU(synth(30), 2);
+  assert.equal(r2.fits, true);
+  assert.ok(r2.headroom > app.TIGHT_HEADROOM_GB_PER_GPU && r2.headroom < 2 * app.TIGHT_HEADROOM_GB_PER_GPU);
+  assert.equal(r2.tight, true, 'headroom under 2 × band on 2 GPUs must be tight');
+  // 4× L4 = 88.32 GB; 30 GB of weights leaves 58.32 GB, above 4 × 8 = 32.
+  const r4 = modelFitsGPU(synth(30), 4);
+  assert.equal(r4.fits, true);
+  assert.equal(r4.tight, false);
+});
+
+test('modelFitsGPU: a miss is never tight, and "Any" carries no tight flag', () => {
+  app.setGpuType('L4-24GB');
+  app.setMemUtil(0.92);
+  app.setKVContext(0);
+  const synth = vram => ({ prec: 'BF16', vram, variants: [], kvBytesPerToken: 0, kvSource: 'none', totalParams: 1 });
+  const miss = modelFitsGPU(synth(30), 1);
+  assert.equal(miss.fits, false);
+  assert.notEqual(miss.tight, true);
+  assert.notEqual(modelFitsGPU(synth(30), 0).tight, true);
+});
+
+test('modelFitsGPU: tight counts the KV estimate too — Llama-3.1-8B BF16 on 1× L4 @ 8K is tight', () => {
+  const m = MODELS_DATA.find(x => x.id === 115);   // Llama-3.1-8B-Instruct, BF16 16 GB
+  app.setGpuType('L4-24GB');
+  app.setMemUtil(0.92);
+  app.setKVDtype('fp16');
+  app.setKVContext(8192);
+  const r = modelFitsGPU(m, 1);                    // 22.08 − 16 − ~1.07 ≈ 5.0 GB left
+  assert.equal(r.fits, true);
+  assert.equal(r.prec, 'BF16');
+  assert.equal(r.tight, true);
+  assert.ok(r.headroom < 8 && r.headroom > 0);
+  // Its FP8 variant (8 GB) on the same GPU leaves ~13 GB, so it would not be tight.
+  const fp8 = { ...m, prec: 'FP8', vram: 8, variants: [] };
+  const r8 = modelFitsGPU(fp8, 1);
+  assert.equal(r8.fits, true);
+  assert.equal(r8.tight, false);
+  app.setKVContext(0);
+});
+
+// ---------------------------------------------------------------------------
 // KV-cache estimate (#12)
 // ---------------------------------------------------------------------------
 test('estKVCacheGB: zero when disabled, positive and monotonic in context', () => {

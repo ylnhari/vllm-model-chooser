@@ -331,7 +331,9 @@
                                 <em>measures</em> at startup by profiling a dummy forward pass. That peak scales with
                                 <code>--max-num-batched-tokens</code> and the model's hidden size, and there is no
                                 sourced way to estimate it here, so it is not modelled. A fit with only a few GB to
-                                spare may not survive it; lower <strong>Mem util</strong> to see a tighter server.
+                                spare may not survive it — such fits are shown as an amber
+                                <span class="text-[#f59e0b] font-semibold">✓</span> (tight); lower
+                                <strong>Mem util</strong> to see a tighter server.
                             </p>
                         </div>
                     </div>
@@ -362,6 +364,22 @@
                                 memory utilization. <span class="text-[#ef4444] font-semibold">✗</span>
                                 = too large, or the quantization format isn't supported on that GPU at all. Hover any
                                 verdict for the arithmetic behind it.
+                            </p>
+                        </div>
+                    </div>
+                    <div class="card p-5 flex gap-4">
+                        <div class="text-3xl font-bold text-[#f59e0b] w-16 shrink-0 text-center leading-none pt-1">✓</div>
+                        <div>
+                            <div class="font-semibold mb-1">Fits, but tight</div>
+                            <p class="text-sm text-[#8888a0]">
+                                Weights (plus KV, if enabled) fit the budget, but with under
+                                <strong>8 GB per GPU</strong> to spare. That figure is a <strong>heuristic warning
+                                band</strong>, not a measurement, and nothing is subtracted from the budget: vLLM
+                                measures the real activation and CUDA-graph peak at startup by profiling a dummy forward
+                                pass, and real logs put that peak anywhere from about 0.1 GiB (a 0.5B model) to
+                                18 GiB per GPU (Gemma-3-27B at a 128K <code>max_model_len</code>), so a thin margin
+                                may not survive it. If you see an amber ✓, lower <code>--max-num-batched-tokens</code>
+                                or <code>--max-model-len</code>, pick a smaller quantization, or add a GPU.
                             </p>
                         </div>
                     </div>
