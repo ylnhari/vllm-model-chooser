@@ -380,6 +380,7 @@
                                 18 GiB per GPU (Gemma-3-27B at a 128K <code>max_model_len</code>), so a thin margin
                                 may not survive it. If you see an amber ✓, lower <code>--max-num-batched-tokens</code>
                                 or <code>--max-model-len</code>, pick a smaller quantization, or add a GPU.
+                                Full explanation with figures: <a href="https://ylnhari.github.io/learning/vllm-memory/" target="_blank" rel="noopener" class="text-[#6366f1] underline">How vLLM uses GPU memory</a> (startup profiling, KV pool sizing, scheduler, every flag).
                             </p>
                         </div>
                     </div>
