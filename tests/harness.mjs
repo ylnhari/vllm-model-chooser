@@ -25,7 +25,7 @@ function makeEl(id) {
   };
 }
 
-export function loadApp() {
+export function loadApp({ search = '' } = {}) {
   const data = fs.readFileSync(path.join(ROOT, 'data.js'), 'utf8');
   const code = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
 
@@ -35,7 +35,13 @@ export function loadApp() {
       if (!els.has(id)) els.set(id, makeEl(id));
       return els.get(id);
     },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) {
+      if (selector !== '#gpuCountFilter .filter-btn') return [];
+      return Array.from({ length: 9 }, (_, value) => ({
+        dataset: { value: String(value) },
+        classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+      }));
+    },
     addEventListener() {},
   };
 
@@ -43,7 +49,7 @@ export function loadApp() {
     document,
     console,
     URLSearchParams,
-    location: { search: '', pathname: '/' },
+    location: { search, pathname: '/' },
     history: { replaceState() {} },
     window: {},
   };
@@ -57,7 +63,7 @@ export function loadApp() {
     'normalizePrec', 'isPrecCompatible', 'precSupportLevel',
     'getGPUVRAM', 'getMemUtil',
     'estKVCacheGB', 'modelFitsGPU', 'maxConcurrentRequests', 'filterModels',
-    'DEFAULT_MEM_UTIL', 'TIGHT_HEADROOM_GB_PER_GPU',
+    'DEFAULT_MEM_UTIL', 'TIGHT_HEADROOM_GB_PER_GPU', 'currentGPUFilter',
   ];
   const wrapped = `${data}\n${code}\n;globalThis.__app = { ${exported.join(', ')} };`;
   vm.runInContext(wrapped, sandbox);

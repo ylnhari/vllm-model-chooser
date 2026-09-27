@@ -682,7 +682,12 @@ function applyStateFromURL() {
         if (params.has(key)) setSelect(id === 'searchInput' ? null : id, params.get(key));
         if (key === 'q' && params.has('q')) { const s = document.getElementById('searchInput'); if (s) s.value = params.get('q'); }
     }
-    if (params.has('count')) currentGPUFilter = parseInt(params.get('count')) || 1;
+    if (params.has('count')) {
+        const requestedCount = Number(params.get('count'));
+        const allowedCounts = [...document.querySelectorAll('#gpuCountFilter .filter-btn')]
+            .map(btn => Number(btn.dataset.value));
+        currentGPUFilter = allowedCounts.includes(requestedCount) ? requestedCount : 1;
+    }
     document.querySelectorAll('#gpuCountFilter .filter-btn').forEach(btn => {
         btn.classList.toggle('active', parseInt(btn.dataset.value) === currentGPUFilter);
     });

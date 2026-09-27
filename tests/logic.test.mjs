@@ -39,6 +39,13 @@ test('normalizePrec: unknown / empty returns null', () => {
   assert.equal(normalizePrec(undefined), null);
 });
 
+test('share URL restores the Any GPU filter and rejects unsupported counts', () => {
+  assert.equal(loadApp({ search: '?count=0' }).currentGPUFilter, 0);
+  assert.equal(loadApp({ search: '?count=8' }).currentGPUFilter, 8);
+  assert.equal(loadApp({ search: '?count=99' }).currentGPUFilter, 1);
+  assert.equal(loadApp({ search: '?count=invalid' }).currentGPUFilter, 1);
+});
+
 // Drift guard: app.js keeps its own copy of normalizePrec (it runs as a classic
 // browser <script>, no ESM import), while the Node scripts import ../shared/prec.mjs.
 // This asserts the two never diverge — the exact failure that made factcheck's old
